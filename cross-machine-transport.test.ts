@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { DISCOVERY_TIMEOUT_MS } from "./cross-machine-discovery.ts";
 import {
   DELIVERY_TIMEOUT_MS,
+  runCommand,
   sendCrossMachine,
   type CommandRunner,
 } from "./cross-machine-transport.ts";
@@ -14,8 +15,15 @@ const agents = JSON.stringify({ id: "cli:agent:list", result: { agents: [{
   name: "reviewer",
   agent_session: { agent: "pi", kind: "path", source: "herdr:pi", value: `/home/user/.pi/agent/sessions/session_${fakeSessionId}.jsonl` },
 }] } });
+const origin = { name: "worker", sessionId: fakeSessionId, machine: "laptop" };
 
-test("discovers machines in parallel and relays with configured command and timeouts", async () => {
+function discoveryResult(command: string, args: string[]) {
+  if (args[0] === "machine") return { code: 0, stdout: machines, stderr: "" };
+  if (command === "herdr") return { code: 0, stdout: agents, stderr: "" };
+  return undefined;
+}
+
+test("discovers machines in parallel and sends hostile message text only on stdin", async () => {
   const calls: Array<{ command: string; args: string[]; stdin?: string; timeoutMs?: number }> = [];
   let activeDiscovery = 0;
   let peakDiscovery = 0;
@@ -37,29 +45,69 @@ test("discovers machines in parallel and relays with configured command and time
     }
     return { code: 0, stdout: '{"ok":true}', stderr: "" };
   };
-  const result = await sendCrossMachine("reviewer", "hello", { name: "worker", sessionId: fakeSessionId, machine: "laptop" }, {
+  const hostileText = 'hello; $(touch /tmp/nope)\n"quoted" && exit 9';
+  const result = await sendCrossMachine("reviewer", hostileText, origin, {
     run,
     herdrBin: "herdr",
-    remoteCommand: "pi-intercom",
-    remoteCommandByMachine: { workstation: "/opt/tools/pi-intercom" },
+    remoteCommand: "/opt/pi tools/pi-intercom --profile trusted",
   });
   assert.equal(result.machine.label, "workstation");
   assert.equal(peakDiscovery, 2);
   assert.equal(calls.some((call) => call.args.includes("disabled")), false);
   const ssh = calls.at(-1)!;
-  assert.deepEqual(ssh.args, ["workstation.example", "/opt/tools/pi-intercom relay --envelope-stdin --json"]);
+  assert.equal(ssh.command, "ssh");
+  assert.deepEqual(ssh.args, ["workstation.example", "/opt/pi tools/pi-intercom --profile trusted relay --envelope-stdin --json"]);
+  assert.equal(ssh.args.some((arg) => arg.includes(hostileText)), false);
+  assert.equal(JSON.parse(ssh.stdin!).text, hostileText);
   assert.equal(ssh.timeoutMs, DELIVERY_TIMEOUT_MS);
   assert.equal(calls.filter((call) => call.command === "herdr").every((call) => call.timeoutMs === DISCOVERY_TIMEOUT_MS), true);
 });
 
-test("non-JSON remote output reports incompatible relay support", async () => {
-  const run: CommandRunner = async (command, args) => {
-    if (args[0] === "machine") return { code: 0, stdout: machines, stderr: "" };
-    if (command === "herdr") return { code: 0, stdout: agents, stderr: "" };
-    return { code: 1, stdout: "", stderr: "unknown command: relay" };
+test("rejects empty or control-character remote commands before invoking SSH", async () => {
+  for (const remoteCommand of ["", "   ", "pi-intercom\r--bad", "pi-intercom\n--bad", "pi-intercom\0--bad"]) {
+    const calls: string[] = [];
+    const run: CommandRunner = async (command, args) => {
+      calls.push(command);
+      return discoveryResult(command, args) ?? { code: 0, stdout: '{"ok":true}', stderr: "" };
+    };
+    await assert.rejects(
+      sendCrossMachine("reviewer", "hi", origin, { run, herdrBin: "herdr", remoteCommand }),
+      /Remote command must/,
+    );
+    assert.equal(calls.includes("ssh"), false);
+  }
+});
+
+test("runCommand returns an awaitable timeout result after terminating its child", async () => {
+  const started = Date.now();
+  const result = await runCommand(process.execPath, ["-e", "setTimeout(() => {}, 10_000)"], undefined, 30);
+  assert.deepEqual(result, { stdout: "", stderr: "", code: 124, timedOut: true });
+  assert.ok(Date.now() - started < 2_000, "timed-out child should be reaped promptly");
+});
+
+test("runCommand rejects once when spawning fails", async () => {
+  await assert.rejects(runCommand("/definitely/not/a/command", [], undefined, 100), /ENOENT/);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+});
+
+test("non-JSON and incompatible remote output report incompatible relay support", async () => {
+  for (const stdout of ["", '{"ok":"yes"}', '{"version":2,"ok":true}']) {
+    const run: CommandRunner = async (command, args) => discoveryResult(command, args) ?? { code: 1, stdout, stderr: "unknown command: relay" };
+    await assert.rejects(
+      sendCrossMachine("reviewer", "hi", origin, { run, herdrBin: "herdr" }),
+      /no compatible relay support and needs upgrading/,
+    );
+  }
+});
+
+test("structured remote failure preserves the reported error", async () => {
+  const run: CommandRunner = async (command, args) => discoveryResult(command, args) ?? {
+    code: 1,
+    stdout: JSON.stringify({ ok: false, error: "target rejected the envelope version" }),
+    stderr: "",
   };
   await assert.rejects(
-    sendCrossMachine("reviewer", "hi", { name: "worker", sessionId: fakeSessionId, machine: "laptop" }, { run, herdrBin: "herdr" }),
-    /no compatible relay support and needs upgrading/,
+    sendCrossMachine("reviewer", "hi", origin, { run, herdrBin: "herdr" }),
+    /Remote intercom delivery via workstation failed: target rejected the envelope version/,
   );
 });

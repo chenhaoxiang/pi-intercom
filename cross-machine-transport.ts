@@ -17,7 +17,6 @@ export interface CrossMachineDeps {
   run?: CommandRunner;
   herdrBin?: string;
   remoteCommand?: string;
-  remoteCommandByMachine?: Record<string, string>;
   discoveryTimeoutMs?: number;
   deliveryTimeoutMs?: number;
 }
@@ -37,17 +36,32 @@ export const runCommand: CommandRunner = (command, args, input, timeoutMs) => ne
   let stdout = "";
   let stderr = "";
   let timedOut = false;
+  let settled = false;
+  const cleanup = () => {
+    if (timer) clearTimeout(timer);
+    child.off("error", onError);
+    child.off("close", onClose);
+  };
+  const onError = (error: Error) => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    reject(error);
+  };
+  const onClose = (code: number | null) => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    resolve({ stdout, stderr, code: timedOut ? 124 : (code ?? 1), ...(timedOut ? { timedOut: true } : {}) });
+  };
   const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
     timedOut = true;
     child.kill("SIGKILL");
   }, timeoutMs);
   child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
   child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
-  child.on("error", reject);
-  child.on("close", (code) => {
-    if (timer) clearTimeout(timer);
-    resolve({ stdout, stderr, code: timedOut ? 124 : (code ?? 1), ...(timedOut ? { timedOut: true } : {}) });
-  });
+  child.on("error", onError);
+  child.on("close", onClose);
   child.stdin.end(input);
 });
 
@@ -63,13 +77,16 @@ export async function sendCrossMachine(
 ): Promise<CrossMachineDelivery> {
   const run = deps.run ?? runCommand;
   const herdr = deps.herdrBin ?? process.env.HERDR_BIN_PATH ?? "herdr";
+  const remoteCommand = deps.remoteCommand ?? "pi-intercom";
+  if (remoteCommand.trim().length === 0) throw new Error("Remote command must not be empty.");
+  // SSH interprets its remote command string, so control characters are not safe here.
+  if (/[\r\n\0]/.test(remoteCommand)) throw new Error("Remote command must not contain CR, LF, or NUL.");
   const match = await discoverRemoteAgent(target, {
     run,
     herdrBin: herdr,
     ...(deps.discoveryTimeoutMs === undefined ? {} : { discoveryTimeoutMs: deps.discoveryTimeoutMs }),
   });
   const envelope: CrossMachineEnvelope = { version: 1, target: match.agent.sessionId ?? match.agent.name, text, origin, trust: "ssh-asserted" };
-  const remoteCommand = deps.remoteCommandByMachine?.[match.machine.label] ?? deps.remoteCommand ?? "pi-intercom";
   const delivered = await run(
     "ssh",
     [match.machine.target, `${remoteCommand} relay --envelope-stdin --json`],
@@ -82,7 +99,9 @@ export async function sendCrossMachine(
   } catch {
     throw relaySupportError(match.machine.label);
   }
-  if (!isRecord(response) || typeof response.ok !== "boolean") throw relaySupportError(match.machine.label);
+  if (!isRecord(response) || typeof response.ok !== "boolean" || ("version" in response && response.version !== 1)) {
+    throw relaySupportError(match.machine.label);
+  }
   if (delivered.code !== 0 || response.ok !== true) {
     if (typeof response.error !== "string") throw relaySupportError(match.machine.label);
     throw new Error(`Remote intercom delivery via ${match.machine.label} failed: ${response.error}`);
