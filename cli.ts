@@ -33,9 +33,8 @@ import {
 } from "./cross-machine.ts";
 import type { CrossMachineProvenance, Message, SessionInfo, SessionRegistration } from "./types.ts";
 
-export const CLI_USAGE = `usage: cli.ts <list|send|ask> [--to <name|session-id>] [--text <message>|--text-stdin]
-                        [--timeout-ms <n>] [--name <session-name>] [--json]
-       cli.ts relay --envelope-stdin [--json]`;
+export const CLI_USAGE = `usage: pi-intercom <list|send|ask> [--to <name|session-id>] [--text <message>|--text-stdin]
+                        [--timeout-ms <n>] [--name <session-name>] [--json]`;
 
 export const DEFAULT_ASK_TIMEOUT_MS = 120_000;
 
@@ -69,6 +68,13 @@ export function parseCliArgs(argv: readonly string[]): CliOptions {
     throw new CliUsageError(`unknown command: ${String(command)}\n${CLI_USAGE}`);
   }
   opts.command = command;
+
+  if (command === "relay"
+    && (rest.filter((arg) => arg === "--envelope-stdin").length !== 1
+      || rest.filter((arg) => arg === "--json").length > 1
+      || rest.some((arg) => arg !== "--envelope-stdin" && arg !== "--json"))) {
+    throw new CliUsageError(`relay requires only --envelope-stdin (and optional --json)\n${CLI_USAGE}`);
+  }
 
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i];
@@ -141,7 +147,6 @@ export interface CliDeps {
   readStdin?: () => Promise<string>;
   crossMachineSend?: (target: string, text: string, origin: ReturnType<typeof resolveOrigin>) => Promise<CrossMachineDelivery>;
   machineName?: string;
-  implicitCrossMachineFallback?: boolean;
 }
 
 export function buildCliRegistration(name: string, now = Date.now(), runtimeFallbackAlias = false): SessionRegistration {
@@ -155,6 +160,10 @@ export function buildCliRegistration(name: string, now = Date.now(), runtimeFall
     ...(runtimeFallbackAlias ? { runtimeFallbackAlias: true } : {}),
     status: "idle",
   };
+}
+
+function isCrossMachineTarget(target: string): boolean {
+  return /^[^@\s]+@[^@\s]+$/.test(target);
 }
 
 function sessionRow(session: SessionInfo): { name: string; id: string; model: string; status: string; cwd: string } {
@@ -183,7 +192,14 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
   try {
     opts = parseCliArgs(argv);
     if (opts.textStdin) opts.text = await (deps.readStdin ?? readProcessStdin)();
-    if (opts.command === "relay") relayEnvelope = parseRelayEnvelope(await (deps.readStdin ?? readProcessStdin)());
+    if (opts.command === "relay") {
+      relayEnvelope = parseRelayEnvelope(await (deps.readStdin ?? readProcessStdin)());
+      if (relayEnvelope.target.includes("@")) throw new CliUsageError("relay target must be a local name or session id");
+    }
+    if (opts.command === "ask" && opts.to!.includes("@")) throw new CliUsageError("ask only supports local names or session ids");
+    if (opts.command === "send" && opts.to!.includes("@") && !isCrossMachineTarget(opts.to!)) {
+      throw new CliUsageError("invalid cross-machine target; expected name@machine");
+    }
   } catch (error) {
     return reportFailure(error instanceof Error ? error.message : String(error));
   }
@@ -223,7 +239,8 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
     }
 
     if (opts.command === "send") {
-      if (deps.crossMachineSend && opts.to!.includes("@")) {
+      if (opts.to!.includes("@")) {
+        if (!deps.crossMachineSend) return reportFailure("cross-machine delivery is unavailable");
         try {
           const sessions = await deps.client.listSessions();
           const remote = await deps.crossMachineSend(opts.to as string, opts.text as string, resolveOrigin(sessions, opts.name, deps.machineName ?? "localhost", deps.client.sessionId));
@@ -236,17 +253,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
       }
       const result = await deps.client.send(opts.to as string, { text: opts.text as string });
       if (!result.delivered) {
-        const targetMissing = (result as { code?: string }).code === "E_TARGET_NOT_FOUND" || result.reason === "Session not found";
-        if (!deps.crossMachineSend || deps.implicitCrossMachineFallback === false || !targetMissing) return reportFailure(`delivery failed: ${result.reason ?? "unknown reason"}`);
-        try {
-          const sessions = await deps.client.listSessions();
-          const remote = await deps.crossMachineSend(opts.to as string, opts.text as string, resolveOrigin(sessions, opts.name, deps.machineName ?? "localhost", deps.client.sessionId));
-          if (opts.json) out.write(`${JSON.stringify({ ok: true, delivered: true, crossMachine: true, machine: remote.machine.label, target: remote.agent.name })}\n`);
-          else out.write(`delivered to ${remote.agent.name}@${remote.machine.label} over SSH\n`);
-          return 0;
-        } catch (error) {
-          return reportFailure(`delivery failed locally (${result.reason ?? "unknown reason"}) and cross-machine delivery failed: ${error instanceof Error ? error.message : String(error)}`);
-        }
+        return reportFailure(`delivery failed: ${result.reason ?? "unknown reason"}`);
       }
       if (opts.json) {
         out.write(`${JSON.stringify({ ok: true, delivered: true, id: result.id }, null, 2)}\n`);
@@ -331,7 +338,6 @@ export async function runMain(argv: readonly string[] = process.argv.slice(2)): 
   return runCli(argv, {
     client: new IntercomClient(),
     machineName: config.crossMachine.machineName,
-    implicitCrossMachineFallback: config.crossMachine.implicitFallback,
     crossMachineSend: (target, text, origin) => sendCrossMachine(target, text, origin, {
       remoteCommand: config.crossMachine.remoteCommand,
       remoteCommandByMachine: config.crossMachine.remoteCommandByMachine,
