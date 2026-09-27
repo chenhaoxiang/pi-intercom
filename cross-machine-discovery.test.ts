@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   DISCOVERY_TIMEOUT_MS,
   discoverRemoteAgent,
+  parseCrossMachineTarget,
   parseRemoteAgents,
   parseSavedMachines,
 } from "./cross-machine-discovery.ts";
@@ -35,6 +36,17 @@ const machines = machineList([
   { label: "disabled", target: "disabled.example", enabled: false },
 ]);
 const agents = agentList([{ name: "reviewer", sessionId: fakeSessionId }]);
+
+test("parses the supported explicit remote address forms", () => {
+  assert.deepEqual(parseCrossMachineTarget("reviewer@Workstation"), {
+    agentTarget: "reviewer",
+    machineLabel: "Workstation",
+  });
+  assert.deepEqual(parseCrossMachineTarget(`${fakeSessionId}@workstation`), {
+    agentTarget: fakeSessionId,
+    machineLabel: "workstation",
+  });
+});
 
 test("parses current Herdr machine and agent list schemas", () => {
   assert.deepEqual(parseSavedMachines(machines), [
@@ -77,7 +89,16 @@ test("unknown and disabled machine labels fail before remote agent listing", asy
 });
 
 test("malformed or non-explicit addresses fail closed without invoking Herdr", async () => {
-  for (const target of ["reviewer", "@workstation", "reviewer@", "reviewer@@workstation", " reviewer@workstation"]) {
+  for (const target of [
+    "reviewer",
+    "@workstation",
+    "reviewer@",
+    "reviewer@@workstation",
+    " reviewer@workstation",
+    "reviewer@workstation ",
+    "review er@workstation",
+    "reviewer@work\tstation",
+  ]) {
     let calls = 0;
     const run: CommandRunner = async () => {
       calls += 1;

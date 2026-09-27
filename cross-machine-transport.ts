@@ -80,7 +80,7 @@ export async function sendCrossMachine(
   const remoteCommand = deps.remoteCommand ?? "pi-intercom";
   if (remoteCommand.trim().length === 0) throw new Error("Remote command must not be empty.");
   // SSH interprets its remote command string, so control characters are not safe here.
-  if (/[\r\n\0]/.test(remoteCommand)) throw new Error("Remote command must not contain CR, LF, or NUL.");
+  if (/[\x00-\x1f\x7f]/.test(remoteCommand)) throw new Error("Remote command must not contain ASCII control characters.");
   const match = await discoverRemoteAgent(target, {
     run,
     herdrBin: herdr,

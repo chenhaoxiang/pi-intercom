@@ -64,16 +64,16 @@ export function parseRemoteAgents(raw: string): RemoteAgent[] {
   });
 }
 
-function parseExplicitTarget(target: string): { agentTarget: string; machineLabel: string } {
+export function parseCrossMachineTarget(target: string): { agentTarget: string; machineLabel: string } {
   const parts = target.split("@");
-  if (parts.length !== 2 || !parts[0] || !parts[1] || parts.some((part) => part !== part.trim())) {
+  if (parts.length !== 2 || parts.some((part) => !part || /\s/.test(part))) {
     throw new Error(`Invalid remote target "${target}"; expected name@machine or full-session-uuid@machine.`);
   }
   return { agentTarget: parts[0], machineLabel: parts[1] };
 }
 
 export async function discoverRemoteAgent(target: string, deps: DiscoveryDeps): Promise<DiscoveredRemoteAgent> {
-  const explicit = parseExplicitTarget(target);
+  const explicit = parseCrossMachineTarget(target);
   const discoveryTimeoutMs = deps.discoveryTimeoutMs ?? DISCOVERY_TIMEOUT_MS;
   const listed = await deps.run(deps.herdrBin, ["machine", "list", "--json"], undefined, discoveryTimeoutMs);
   if (listed.code !== 0) throw new Error(`Could not list Herdr saved machines: ${listed.timedOut ? "timed out" : listed.stderr.trim() || `exit ${listed.code}`}`);

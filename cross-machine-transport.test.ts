@@ -57,7 +57,7 @@ test("discovers only the selected machine and sends hostile message text only on
 });
 
 test("rejects empty or control-character remote commands before invoking SSH", async () => {
-  for (const remoteCommand of ["", "   ", "pi-intercom\r--bad", "pi-intercom\n--bad", "pi-intercom\0--bad"]) {
+  for (const remoteCommand of ["", "   ", "pi-intercom\0--bad", "pi-intercom\t--bad", "pi-intercom\x1f--bad", "pi-intercom\x7f--bad"]) {
     const calls: string[] = [];
     const run: CommandRunner = async (command, args) => {
       calls.push(command);
@@ -65,7 +65,7 @@ test("rejects empty or control-character remote commands before invoking SSH", a
     };
     await assert.rejects(
       sendCrossMachine("reviewer@workstation", "hi", origin, { run, herdrBin: "herdr", remoteCommand }),
-      /Remote command must/,
+      /Remote command must (not be empty|not contain ASCII control characters)/,
     );
     assert.equal(calls.includes("ssh"), false);
   }

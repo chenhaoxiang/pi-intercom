@@ -11,6 +11,7 @@ import {
   runCli,
   type CliClient,
 } from "./cli.ts";
+import { parseCrossMachineTarget } from "./cross-machine-discovery.ts";
 import type { CrossMachineProvenance, Message, SessionInfo, SessionRegistration } from "./types.ts";
 
 class MemorySink {
@@ -239,19 +240,32 @@ test("runCli treats name@machine as an explicit remote address before local deli
   assert.equal(client.sends.length, 0);
 });
 
-test("runCli rejects malformed remote addresses and remote ask targets", async () => {
-  for (const argv of [
-    ["send", "--to", "@workstation", "--text", "hello"],
-    ["send", "--to", "reviewer@", "--text", "hello"],
-    ["send", "--to", "reviewer@workstation@extra", "--text", "hello"],
-    ["ask", "--to", "reviewer@workstation", "--text", "hello"],
-  ]) {
+test("runCli and discovery share the explicit remote address corpus", async () => {
+  for (const target of ["reviewer@workstation", "00000000-0000-4000-8000-000000000001@workstation"]) {
+    assert.doesNotThrow(() => parseCrossMachineTarget(target));
+    const code = await runCli(["send", "--to", target, "--text", "hello"], {
+      client: new FakeClient(),
+      out: new MemorySink(),
+      err: new MemorySink(),
+      crossMachineSend: async () => ({ machine: { label: "workstation", target: "host", enabled: true }, agent: { name: "reviewer" }, stdout: "" }),
+    });
+    assert.equal(code, 0);
+  }
+
+  for (const target of ["@workstation", "reviewer@", "reviewer@@workstation", " reviewer@workstation", "reviewer@workstation ", "review er@workstation", "reviewer@work\tstation"]) {
+    assert.throws(() => parseCrossMachineTarget(target), /expected name@machine or full-session-uuid@machine/);
     const client = new FakeClient();
-    const code = await runCli(argv, { client, out: new MemorySink(), err: new MemorySink() });
+    const code = await runCli(["send", "--to", target, "--text", "hello"], { client, out: new MemorySink(), err: new MemorySink() });
     assert.equal(code, 1);
     assert.equal(client.registrations.length, 0);
     assert.equal(client.sends.length, 0);
   }
+
+  const client = new FakeClient();
+  assert.equal(await runCli(["ask", "--to", "reviewer@workstation", "--text", "hello"], {
+    client, out: new MemorySink(), err: new MemorySink(),
+  }), 1);
+  assert.equal(client.registrations.length, 0);
 });
 
 test("runCli relay registers an ephemeral asserted sender and forwards the envelope", async () => {

@@ -35,6 +35,7 @@ import { formatContextUsage } from "./format-context.ts";
 import { openProjectPane, resolveTargetInCwd, waitForProjectSession, type ProjectPaneLaunch } from "./project-agent.ts";
 import { relaySenderName } from "./cross-machine-envelope.ts";
 import { sendCrossMachine } from "./cross-machine-transport.ts";
+import { parseCrossMachineTarget } from "./cross-machine-discovery.ts";
 
 const INTERCOM_TOOL_NAME = "intercom";
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
@@ -2412,6 +2413,16 @@ Usage:
                 details: { error: true, crossMachine: false },
               };
             }
+            if (crossMachineTarget) {
+              try {
+                parseCrossMachineTarget(to!);
+              } catch (error) {
+                return {
+                  content: [{ type: "text", text: getErrorMessage(error) }],
+                  details: { error: true, crossMachine: false },
+                };
+              }
+            }
             if (openProjectPaneIfMissing && !cwd) {
               return {
                 content: [{ type: "text", text: "openProjectPaneIfMissing requires a target cwd." }],
@@ -2425,6 +2436,15 @@ Usage:
                 "Send message",
                 `Send to "${to ?? cwd}":\n\n${message}${attachmentText}`,
               );
+              if (!confirmed) {
+                return {
+                  content: [{ type: "text", text: "Message cancelled by user" }],
+                  details: {},
+                };
+              }
+            }
+            if (confirmSend && crossMachineTarget) {
+              const confirmed = await ctx.ui.confirm("Send message", `Send to "${to}":\n\n${message}`);
               if (!confirmed) {
                 return {
                   content: [{ type: "text", text: "Message cancelled by user" }],

@@ -30,6 +30,7 @@ import {
   type CrossMachineEnvelope,
 } from "./cross-machine-envelope.ts";
 import { sendCrossMachine, type CrossMachineDelivery } from "./cross-machine-transport.ts";
+import { parseCrossMachineTarget } from "./cross-machine-discovery.ts";
 import type { CrossMachineProvenance, Message, SessionInfo, SessionRegistration } from "./types.ts";
 
 export const CLI_USAGE = `usage: pi-intercom <list|send|ask> [--to <name|session-id>] [--text <message>]
@@ -152,10 +153,6 @@ export function buildCliRegistration(name: string, now = Date.now(), runtimeFall
   };
 }
 
-function isCrossMachineTarget(target: string): boolean {
-  return /^[^@\s]+@[^@\s]+$/.test(target);
-}
-
 function sessionRow(session: SessionInfo): { name: string; id: string; model: string; status: string; cwd: string } {
   return {
     name: session.name ?? "(unnamed)",
@@ -186,8 +183,8 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
       if (relayEnvelope.target.includes("@")) throw new CliUsageError("relay target must be a local name or session id");
     }
     if (opts.command === "ask" && opts.to!.includes("@")) throw new CliUsageError("ask only supports local names or session ids");
-    if (opts.command === "send" && opts.to!.includes("@") && !isCrossMachineTarget(opts.to!)) {
-      throw new CliUsageError("invalid cross-machine target; expected name@machine");
+    if (opts.command === "send" && opts.to!.includes("@")) {
+      parseCrossMachineTarget(opts.to!);
     }
   } catch (error) {
     return reportFailure(error instanceof Error ? error.message : String(error));
