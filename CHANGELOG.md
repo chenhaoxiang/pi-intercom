@@ -4,11 +4,19 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-27
+
+### Highlights
+- Send one-way text messages to Pi sessions on saved Herdr machines with `name@machine` addressing.
+- Keep remote brokers local-only while SSH carries messages between machines.
+- See a clear `unverified cross-machine` label on messages received from another machine.
+- Update pi-intercom on Windows without open Pi sessions locking the installed package.
+
 ### Added
-- Added explicit one-way text `send` to `name@machine` or `full-session-uuid@machine` over SSH through enabled Herdr saved machines. Remote brokers remain local-only, relayed origins are clearly marked as unverified and SSH-asserted, and unsupported reply, attachment, lifecycle, and cwd semantics fail closed. Thanks to [@odfalik](https://github.com/odfalik) for issue #138 and the original prototype.
+- Added one-way text `send` to `name@machine` or `full-session-uuid@machine` over SSH through enabled Herdr saved machines. Remote brokers remain local-only, received messages are clearly marked as unverified, and unsupported operations fail with a clear error. Thanks to [@odfalik](https://github.com/odfalik) for issue #138 and the original prototype.
 
 ### Fixed
-- Run the broker from its runtime directory so open Pi sessions no longer prevent package updates on Windows. Thanks to [@XWIlluDelu](https://github.com/XWIlluDelu) for #139.
+- Open Pi sessions no longer prevent package updates on Windows. Thanks to [@XWIlluDelu](https://github.com/XWIlluDelu) for #139.
 
 ## [0.14.0] - 2026-09-23
 
