@@ -53,10 +53,8 @@ test("loadConfig defaults cross-machine routing", async () => {
   try {
     await withAgentDir(root, () => {
       const config = loadConfig().crossMachine;
-      assert.equal(config.implicitFallback, true);
       assert.equal(config.remoteCommand, "pi-intercom");
       assert.equal(config.machineName.length > 0, true);
-      assert.deepEqual(config.remoteCommandByMachine, {});
     });
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -69,16 +67,12 @@ test("loadConfig accepts cross-machine overrides", async () => {
     mkdirSync(join(root, "intercom"), { recursive: true });
     writeFileSync(join(root, "intercom", "config.json"), JSON.stringify({ crossMachine: {
       machineName: "laptop",
-      implicitFallback: false,
       remoteCommand: "/opt/tools/pi-intercom",
-      remoteCommandByMachine: { workstation: "/usr/local/bin/pi-intercom" },
     } }));
     await withAgentDir(root, () => {
       assert.deepEqual(loadConfig().crossMachine, {
         machineName: "laptop",
-        implicitFallback: false,
         remoteCommand: "/opt/tools/pi-intercom",
-        remoteCommandByMachine: { workstation: "/usr/local/bin/pi-intercom" },
       });
     });
   } finally {
@@ -143,13 +137,13 @@ test("loadConfig rejects invalid inboundTrigger values", async () => {
   }
 });
 
-test("loadConfig rejects invalid cross-machine values", async () => {
+test("loadConfig rejects empty cross-machine strings", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-intercom-config-"));
   try {
     mkdirSync(join(root, "intercom"), { recursive: true });
-    writeFileSync(join(root, "intercom", "config.json"), JSON.stringify({ crossMachine: { implicitFallback: "yes" } }));
+    writeFileSync(join(root, "intercom", "config.json"), JSON.stringify({ crossMachine: { remoteCommand: "  " } }));
     await withAgentDir(root, () => {
-      assert.throws(() => loadConfig(), /"crossMachine.implicitFallback" must be a boolean/);
+      assert.throws(() => loadConfig(), /"crossMachine.remoteCommand" must be a non-empty string/);
     });
   } finally {
     rmSync(root, { recursive: true, force: true });

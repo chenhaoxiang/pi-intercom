@@ -30,12 +30,8 @@ export type BusyDeliveryPolicy = "steer" | "human-first";
 export interface CrossMachineConfig {
   /** Name peers use for this host in their Herdr saved-machine lists. */
   machineName: string;
-  /** Search saved machines after a local target-not-found response. */
-  implicitFallback: boolean;
   /** Command invoked through SSH on remote machines. */
   remoteCommand: string;
-  /** Per-saved-machine command overrides for minimal non-interactive SSH PATHs. */
-  remoteCommandByMachine: Record<string, string>;
 }
 
 export interface IntercomConfig {
@@ -88,16 +84,14 @@ const defaults: IntercomConfig = {
   replyHint: true,
   crossMachine: {
     machineName: defaultMachineName(),
-    implicitFallback: true,
     remoteCommand: "pi-intercom",
-    remoteCommandByMachine: {},
   },
 };
 
 export function loadConfig(): IntercomConfig {
   const configPath = getConfigPath();
   if (!existsSync(configPath)) {
-    return { ...defaults, crossMachine: { ...defaults.crossMachine, remoteCommandByMachine: {} } };
+    return { ...defaults, crossMachine: { ...defaults.crossMachine } };
   }
   
   try {
@@ -110,10 +104,7 @@ export function loadConfig(): IntercomConfig {
     const parsedConfig = parsed as Record<string, unknown>;
     const config: IntercomConfig = {
       ...defaults,
-      crossMachine: {
-        ...defaults.crossMachine,
-        remoteCommandByMachine: { ...defaults.crossMachine.remoteCommandByMachine },
-      },
+      crossMachine: { ...defaults.crossMachine },
     };
 
     if (Object.hasOwn(parsedConfig, "brokerCommand")) {
@@ -210,31 +201,11 @@ export function loadConfig(): IntercomConfig {
         }
         config.crossMachine.machineName = crossMachine.machineName.trim();
       }
-      if (Object.hasOwn(crossMachine, "implicitFallback")) {
-        if (typeof crossMachine.implicitFallback !== "boolean") {
-          throw new Error(`"crossMachine.implicitFallback" must be a boolean`);
-        }
-        config.crossMachine.implicitFallback = crossMachine.implicitFallback;
-      }
       if (Object.hasOwn(crossMachine, "remoteCommand")) {
         if (typeof crossMachine.remoteCommand !== "string" || !crossMachine.remoteCommand.trim()) {
           throw new Error(`"crossMachine.remoteCommand" must be a non-empty string`);
         }
         config.crossMachine.remoteCommand = crossMachine.remoteCommand.trim();
-      }
-      if (Object.hasOwn(crossMachine, "remoteCommandByMachine")) {
-        const commands = crossMachine.remoteCommandByMachine;
-        if (typeof commands !== "object" || commands === null || Array.isArray(commands)) {
-          throw new Error(`"crossMachine.remoteCommandByMachine" must be an object`);
-        }
-        const parsedCommands: Record<string, string> = {};
-        for (const [label, command] of Object.entries(commands)) {
-          if (!label.trim() || typeof command !== "string" || !command.trim()) {
-            throw new Error(`"crossMachine.remoteCommandByMachine" entries must have non-empty labels and commands`);
-          }
-          parsedCommands[label] = command.trim();
-        }
-        config.crossMachine.remoteCommandByMachine = parsedCommands;
       }
     }
 
