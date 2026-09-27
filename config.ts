@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
+import { hostname } from "os";
 import { getIntercomDirPath } from "./broker/paths.ts";
+import { defaultMachineName } from "./cross-machine-envelope.ts";
 
 const DEFAULT_ASK_TIMEOUT_MS = 10 * 60 * 1000;
 const INTERCOM_SCOPE_ID_ENV = "PI_INTERCOM_SCOPE_ID";
@@ -25,6 +27,13 @@ export function getIntercomScopeId(env: NodeJS.ProcessEnv = process.env): string
 
 export type InboundTriggerPolicy = "always" | "replies" | "never";
 export type BusyDeliveryPolicy = "steer" | "human-first";
+
+export interface CrossMachineConfig {
+  /** Name peers use for this host in their Herdr saved-machine lists. */
+  machineName: string;
+  /** Command invoked through SSH on remote machines. */
+  remoteCommand: string;
+}
 
 export interface IntercomConfig {
   /** Broker command used to spawn the broker process (e.g. "npx" or "bun") */
@@ -53,6 +62,9 @@ export interface IntercomConfig {
   
   /** Show reply hint in incoming messages (default: true) */
   replyHint: boolean;
+
+  /** Cross-machine discovery and SSH relay settings. */
+  crossMachine: CrossMachineConfig;
 }
 
 export function getConfigPath(intercomDir: string = getIntercomDirPath()): string {
@@ -67,12 +79,16 @@ const defaults: IntercomConfig = {
   busyDelivery: "steer",
   enabled: true,
   replyHint: true,
+  crossMachine: {
+    machineName: defaultMachineName(hostname()),
+    remoteCommand: "pi-intercom",
+  },
 };
 
 export function loadConfig(): IntercomConfig {
   const configPath = getConfigPath();
   if (!existsSync(configPath)) {
-    return { ...defaults };
+    return { ...defaults, crossMachine: { ...defaults.crossMachine } };
   }
   
   try {
@@ -83,7 +99,10 @@ export function loadConfig(): IntercomConfig {
     }
 
     const parsedConfig = parsed as Record<string, unknown>;
-    const config: IntercomConfig = { ...defaults };
+    const config: IntercomConfig = {
+      ...defaults,
+      crossMachine: { ...defaults.crossMachine },
+    };
 
     if (Object.hasOwn(parsedConfig, "brokerCommand")) {
       if (typeof parsedConfig.brokerCommand !== "string") {
@@ -165,6 +184,26 @@ export function loadConfig(): IntercomConfig {
         throw new Error(`"stableId" must not be empty`);
       }
       config.stableId = stableId;
+    }
+
+    if (Object.hasOwn(parsedConfig, "crossMachine")) {
+      const value = parsedConfig.crossMachine;
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        throw new Error(`"crossMachine" must be an object`);
+      }
+      const crossMachine = value as Record<string, unknown>;
+      if (Object.hasOwn(crossMachine, "machineName")) {
+        if (typeof crossMachine.machineName !== "string" || !crossMachine.machineName.trim()) {
+          throw new Error(`"crossMachine.machineName" must be a non-empty string`);
+        }
+        config.crossMachine.machineName = crossMachine.machineName.trim();
+      }
+      if (Object.hasOwn(crossMachine, "remoteCommand")) {
+        if (typeof crossMachine.remoteCommand !== "string" || !crossMachine.remoteCommand.trim()) {
+          throw new Error(`"crossMachine.remoteCommand" must be a non-empty string`);
+        }
+        config.crossMachine.remoteCommand = crossMachine.remoteCommand.trim();
+      }
     }
 
     return config;

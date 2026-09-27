@@ -414,7 +414,11 @@ Create `~/.pi/agent/intercom/config.json`:
   "busyDelivery": "steer",
   "enabled": true,
   "replyHint": true,
-  "status": "researching"
+  "status": "researching",
+  "crossMachine": {
+    "machineName": "laptop",
+    "remoteCommand": "/usr/local/bin/pi-intercom"
+  }
 }
 ```
 
@@ -428,6 +432,8 @@ Create `~/.pi/agent/intercom/config.json`:
 | `enabled` | true | Enable/disable intercom entirely |
 | `replyHint` | true | Include reply instruction in incoming messages |
 | `status` | — | Optional custom status suffix shown after the automatic lifecycle status, for example `thinking · researching` |
+| `crossMachine.machineName` | lowercased short hostname | Name peers use for this host in their Herdr saved-machine lists |
+| `crossMachine.remoteCommand` | `"pi-intercom"` | Command invoked through non-interactive SSH on remote machines |
 
 If `config.json` cannot be parsed or contains an invalid value, pi-intercom logs the error and fails closed for inbound broker auto-triggering by using `inboundTrigger: "never"` until the config is fixed.
 Obsolete `toolVisibility` values are ignored; the generic `intercom` tool remains stable in the active tool set for prompt-cache friendliness.
@@ -528,22 +534,20 @@ pi.events.on(INTERCOM_SESSION_IDENTITY_EVENT, (request: IntercomSessionIdentityR
 ```
 ## Scripting and Remote Machines
 
-`cli.ts` is a minimal command-line client for scripted access to the local broker. It registers as a regular session (so it appears in the roster and can receive replies while connected), reuses the same `IntercomClient` as the extension, and adds no network surface — it only ever talks to the same-machine broker.
-
-These commands assume pi-intercom is installed by Pi under `~/.pi/agent/npm/node_modules/pi-intercom/`; `npx --yes tsx` supplies the TypeScript runner without requiring a global `tsx` installation. Run them on the broker's machine with an existing pi-intercom session: the CLI does not start a broker.
+The `pi-intercom` executable is a minimal command-line client for scripted access to the local broker. It registers as a regular session (so it appears in the roster and can receive replies while connected), reuses the same `IntercomClient` as the extension, and does not start a broker.
 
 ```bash
 # roster
-npx --yes tsx ~/.pi/agent/npm/node_modules/pi-intercom/cli.ts list
+pi-intercom list
 
 # fire-and-forget message (cron hooks, CI, notifications)
-npx --yes tsx ~/.pi/agent/npm/node_modules/pi-intercom/cli.ts send --to worker --text "build failed — please look at src/api"
+pi-intercom send --to worker --text "build failed — please look at src/api"
 
 # blocking ask: prints the other session's reply and exits
-npx --yes tsx ~/.pi/agent/npm/node_modules/pi-intercom/cli.ts ask --to planner --text "which API version?" --timeout-ms 180000
+pi-intercom ask --to planner --text "which API version?" --timeout-ms 180000
 
 # JSON output for scripts
-npx --yes tsx ~/.pi/agent/npm/node_modules/pi-intercom/cli.ts list --json
+pi-intercom list --json
 ```
 
 Flags: `--to <name|session-id>`, `--text`, `--name <session-name>` (roster name, default `pi-intercom-cli`), `--timeout-ms` (ask only, default 120000), `--json`. Exit codes: `0` success, `1` usage/connection/delivery failure, `2` ask timeout. With `--json`, every command prints one object with an `ok` field: `list` returns `{ ok: true, sessions: [...] }`, and failures return `ok: false` with `error` (plus `reason: "timeout"` on timeout).
@@ -553,10 +557,14 @@ Flags: `--to <name|session-id>`, `--text`, `--name <session-name>` (roster name,
 Because the CLI runs *on the machine that owns the broker*, you can bridge sessions across machines through ssh without opening any network listener — the remote broker stays exactly as local-only as before:
 
 ```bash
-ssh myserver 'npx --yes tsx ~/.pi/agent/npm/node_modules/pi-intercom/cli.ts ask --to worker --text "done with the migration?"'
+ssh remote-host 'pi-intercom ask --to worker --text "done with the migration?"'
 ```
 
-The remote session's reply is routed back to the CLI connection and printed locally, so shell scripts (and other pi sessions driving them) can hold full ask/reply conversations with sessions on other machines.
+For native cross-machine `send`, pi-intercom discovers an agent on an explicitly selected, enabled Herdr saved machine and relays through SSH while every broker remains local-only. Use `reviewer@workstation` (or a full session UUID followed by `@workstation`) to route to the saved `workstation` machine. Ordinary local targets never fall back to remote discovery, and unknown, disabled, or malformed machine entries fail closed.
+
+The relay carries structured SSH-asserted origin metadata. Incoming headers render `From worker@laptop · unverified cross-machine` and provide a new-message `send` hint to that address. This identity is not cryptographically verified: anyone with SSH access that can invoke the relay can claim it. Cross-machine `ask`, `replyTo`, attachments, supersede, retry, cwd/project-pane routing, and lifecycle actions are not supported in v1.
+
+Discovery and delivery are bounded by five-second and fifteen-second timeouts respectively. Remote hosts must provide a compatible `pi-intercom relay` command. Non-interactive SSH often has a minimal `PATH`; set the trusted global `crossMachine.remoteCommand` to an absolute command when needed. Unknown relay versions and non-JSON responses produce an upgrade error.
 
 ## How It Works
 

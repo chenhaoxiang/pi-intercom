@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkS
 import { join } from "path";
 import { createHash, randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
-import { isMessage, isMessageReceipt, isSessionId, isSessionRegistration } from "./protocol.ts";
+import { isMessage, isMessageReceipt, isSessionId, isSessionRegistration, messageDeliveryFingerprint } from "./protocol.ts";
 import {
   ensureIntercomRuntimeDir,
   getBrokerListenTarget,
@@ -1066,16 +1066,7 @@ class IntercomBroker {
   }
 
   private deliveryFingerprint(message: Message, targetId: string): string {
-    return JSON.stringify({
-      targetId,
-      text: message.content.text,
-      attachments: message.content.attachments,
-      replyTo: message.replyTo,
-      expectsReply: message.expectsReply,
-      supersedes: message.supersedes,
-      retryOf: message.retryOf,
-      provenance: message.provenance,
-    });
+    return messageDeliveryFingerprint(message, targetId);
   }
 
   private deliveryRecordKey(fromSessionId: string, messageId: string): string {

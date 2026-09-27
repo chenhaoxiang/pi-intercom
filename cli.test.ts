@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { join } from "node:path";
 import {
   CLI_USAGE,
   DEFAULT_ASK_TIMEOUT_MS,
@@ -8,7 +11,8 @@ import {
   runCli,
   type CliClient,
 } from "./cli.ts";
-import type { Message, SessionInfo, SessionRegistration } from "./types.ts";
+import { parseCrossMachineTarget } from "./cross-machine-discovery.ts";
+import type { CrossMachineProvenance, Message, SessionInfo, SessionRegistration } from "./types.ts";
 
 class MemorySink {
   chunks: string[] = [];
@@ -32,7 +36,7 @@ interface FakeClientOptions {
 
 class FakeClient implements CliClient {
   registrations: SessionRegistration[] = [];
-  sends: Array<{ to: string; text: string; expectsReply?: boolean }> = [];
+  sends: Array<{ to: string; text: string; expectsReply?: boolean; crossMachine?: CrossMachineProvenance }> = [];
   disconnected = false;
   private readonly options: FakeClientOptions;
   private listeners: Array<(from: SessionInfo, message: Message) => void> = [];
@@ -51,8 +55,8 @@ class FakeClient implements CliClient {
     return this.options.sessions ?? [];
   }
 
-  async send(to: string, options: { text: string; expectsReply?: boolean }): Promise<{ id: string; delivered: boolean; reason?: string }> {
-    this.sends.push({ to, text: options.text, expectsReply: options.expectsReply });
+  async send(to: string, options: { text: string; expectsReply?: boolean; crossMachine?: CrossMachineProvenance }): Promise<{ id: string; delivered: boolean; reason?: string }> {
+    this.sends.push({ to, text: options.text, expectsReply: options.expectsReply, ...(options.crossMachine ? { crossMachine: options.crossMachine } : {}) });
     if (this.options.sendError) {
       throw this.options.sendError;
     }
@@ -136,6 +140,21 @@ test("parseCliArgs requires --to and --text for send/ask", () => {
   assert.throws(() => parseCliArgs(["send", "--text", "hi"]), /--to is required/);
   assert.throws(() => parseCliArgs(["send", "--to", "w"]), /--text is required/);
   assert.throws(() => parseCliArgs(["ask", "--to", "w"]), /--text is required/);
+  assert.throws(() => parseCliArgs(["send", "--to", "w", "--text-stdin", "ignored"]), /unknown option/);
+});
+
+test("parseCliArgs keeps relay hidden and restricted to an stdin envelope", () => {
+  assert.doesNotMatch(CLI_USAGE, /relay/);
+  assert.equal(parseCliArgs(["relay", "--envelope-stdin", "--json"]).envelopeStdin, true);
+  for (const argv of [
+    ["relay"],
+    ["relay", "--envelope-stdin", "--text", "hello"],
+    ["relay", "--envelope-stdin", "--text", ""],
+    ["relay", "--envelope-stdin", "--name", "pi-intercom-cli"],
+    ["relay", "--envelope-stdin", "--envelope-stdin"],
+  ]) {
+    assert.throws(() => parseCliArgs(argv), /relay requires only --envelope-stdin/);
+  }
 });
 
 test("buildCliRegistration fills required session fields", () => {
@@ -188,6 +207,100 @@ test("runCli send exits 1 on delivery failure", async () => {
   const code = await runCli(["send", "--to", "ghost", "--text", "hi"], { client, out, err });
   assert.equal(code, 1);
   assert.match(err.text(), /delivery failed: Session not found/);
+});
+
+test("runCli does not fall back to cross-machine send after local failure", async () => {
+  const client = new FakeClient({ sendResult: { id: "sent-1", delivered: false, reason: "Session not found" } });
+  const out = new MemorySink();
+  const err = new MemorySink();
+  let attempted = false;
+  const code = await runCli(["send", "--to", "reviewer", "--text", "hello", "--name", "worker", "--json"], {
+    client,
+    out,
+    err,
+    crossMachineSend: async () => {
+      attempted = true;
+      throw new Error("should not run");
+    },
+  });
+  assert.equal(code, 1);
+  assert.equal(attempted, false);
+  assert.match(JSON.parse(out.text()).error, /delivery failed: Session not found/);
+});
+
+test("runCli treats name@machine as an explicit remote address before local delivery", async () => {
+  const client = new FakeClient();
+  const code = await runCli(["send", "--to", "reviewer@workstation", "--text", "hello"], {
+    client,
+    out: new MemorySink(),
+    err: new MemorySink(),
+    crossMachineSend: async () => ({ machine: { label: "workstation", target: "workstation.example", enabled: true }, agent: { name: "reviewer" }, stdout: "" }),
+  });
+  assert.equal(code, 0);
+  assert.equal(client.sends.length, 0);
+});
+
+test("runCli and discovery share the explicit remote address corpus", async () => {
+  for (const target of ["reviewer@workstation", "00000000-0000-4000-8000-000000000001@workstation"]) {
+    assert.doesNotThrow(() => parseCrossMachineTarget(target));
+    const code = await runCli(["send", "--to", target, "--text", "hello"], {
+      client: new FakeClient(),
+      out: new MemorySink(),
+      err: new MemorySink(),
+      crossMachineSend: async () => ({ machine: { label: "workstation", target: "host", enabled: true }, agent: { name: "reviewer" }, stdout: "" }),
+    });
+    assert.equal(code, 0);
+  }
+
+  for (const target of ["@workstation", "reviewer@", "reviewer@@workstation", " reviewer@workstation", "reviewer@workstation ", "review er@workstation", "reviewer@work\tstation"]) {
+    assert.throws(() => parseCrossMachineTarget(target), /expected name@machine or full-session-uuid@machine/);
+    const client = new FakeClient();
+    const code = await runCli(["send", "--to", target, "--text", "hello"], { client, out: new MemorySink(), err: new MemorySink() });
+    assert.equal(code, 1);
+    assert.equal(client.registrations.length, 0);
+    assert.equal(client.sends.length, 0);
+  }
+
+  const client = new FakeClient();
+  assert.equal(await runCli(["ask", "--to", "reviewer@workstation", "--text", "hello"], {
+    client, out: new MemorySink(), err: new MemorySink(),
+  }), 1);
+  assert.equal(client.registrations.length, 0);
+});
+
+test("runCli relay registers an ephemeral asserted sender and forwards the envelope", async () => {
+  const client = new FakeClient();
+  const out = new MemorySink();
+  const code = await runCli(["relay", "--envelope-stdin", "--json"], {
+    client,
+    out,
+    err: new MemorySink(),
+    readStdin: async () => JSON.stringify({ version: 1, target: "reviewer", text: "hello", trust: "ssh-asserted", origin: { name: "worker", sessionId: "00000000-0000-4000-8000-000000000001", machine: "laptop" } }),
+  });
+  assert.equal(code, 0);
+  assert.equal(client.registrations[0]?.name, "worker@laptop");
+  assert.equal(client.registrations[0]?.runtimeFallbackAlias, true);
+  assert.equal(client.sends[0]?.to, "reviewer");
+  assert.equal(client.sends[0]?.text, "[Unverified cross-machine origin]\nhello");
+  assert.deepEqual(client.sends[0]?.crossMachine, {
+    type: "ssh-relay",
+    version: 1,
+    origin: { name: "worker", sessionId: "00000000-0000-4000-8000-000000000001", machine: "laptop" },
+    trust: "ssh-asserted",
+  });
+});
+
+test("runCli relay cannot recurse to a remote address", async () => {
+  const client = new FakeClient();
+  const code = await runCli(["relay", "--envelope-stdin", "--json"], {
+    client,
+    out: new MemorySink(),
+    err: new MemorySink(),
+    readStdin: async () => JSON.stringify({ version: 1, target: "reviewer@workstation", text: "hello", trust: "ssh-asserted", origin: { name: "worker", sessionId: "session", machine: "laptop" } }),
+  });
+  assert.equal(code, 1);
+  assert.equal(client.registrations.length, 0);
+  assert.equal(client.sends.length, 0);
 });
 
 test("runCli ask prints the reply", async () => {
@@ -271,4 +384,45 @@ test("runCli exits 1 with usage text for bad arguments", async () => {
   assert.equal(code, 1);
   assert.match(err.text(), new RegExp(CLI_USAGE.slice(0, 20)));
   assert.equal(client.registrations.length, 0);
+});
+
+test("packed artifact contains an executable pi-intercom bin and its runtime modules", () => {
+  const temp = mkdtempSync(join(process.cwd(), ".pi-intercom-pack-"));
+  const cache = join(temp, "npm-cache");
+  const extracted = join(temp, "extracted");
+  mkdirSync(cache);
+  mkdirSync(extracted);
+  try {
+    const npmArgs = ["--ignore-scripts", "--cache", cache, "--json"];
+    const dryRun = JSON.parse(execFileSync("npm", ["pack", "--dry-run", ...npmArgs], { encoding: "utf8" })) as Array<{ files: Array<{ path: string }> }>;
+    const dryRunFiles = new Set(dryRun[0]!.files.map((file) => file.path));
+    for (const path of [
+      "cli.mjs",
+      "cli.ts",
+      "cross-machine-discovery.ts",
+      "cross-machine-envelope.ts",
+      "cross-machine-transport.ts",
+      "broker/client.ts",
+      "package.json",
+    ]) {
+      assert.equal(dryRunFiles.has(path), true, `dry-run omitted ${path}`);
+    }
+
+    const packed = JSON.parse(execFileSync("npm", ["pack", "--pack-destination", temp, ...npmArgs], { encoding: "utf8" })) as Array<{ filename: string }>;
+    const tarball = join(temp, packed[0]!.filename);
+    const tarFiles = execFileSync("tar", ["-tzf", tarball], { encoding: "utf8" }).trim().split("\n");
+    assert.equal(tarFiles.includes("package/cli.mjs"), true);
+    execFileSync("tar", ["-xzf", tarball, "-C", extracted]);
+
+    const packageRoot = join(extracted, "package");
+    const manifest = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8")) as { bin?: Record<string, string> };
+    assert.equal(manifest.bin?.["pi-intercom"], "cli.mjs");
+    const executable = join(packageRoot, "cli.mjs");
+    assert.notEqual(statSync(executable).mode & 0o111, 0);
+    const smoke = spawnSync(executable, [], { cwd: packageRoot, encoding: "utf8" });
+    assert.equal(smoke.status, 1);
+    assert.match(smoke.stderr, /usage: pi-intercom/);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
 });

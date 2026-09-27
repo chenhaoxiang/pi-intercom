@@ -48,6 +48,38 @@ test("loadConfig defaults inboundTrigger to current auto-trigger behavior", asyn
   }
 });
 
+test("loadConfig defaults cross-machine routing", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-intercom-config-"));
+  try {
+    await withAgentDir(root, () => {
+      const config = loadConfig().crossMachine;
+      assert.equal(config.remoteCommand, "pi-intercom");
+      assert.equal(config.machineName.length > 0, true);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig accepts cross-machine overrides", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-intercom-config-"));
+  try {
+    mkdirSync(join(root, "intercom"), { recursive: true });
+    writeFileSync(join(root, "intercom", "config.json"), JSON.stringify({ crossMachine: {
+      machineName: "laptop",
+      remoteCommand: "/opt/tools/pi-intercom",
+    } }));
+    await withAgentDir(root, () => {
+      assert.deepEqual(loadConfig().crossMachine, {
+        machineName: "laptop",
+        remoteCommand: "/opt/tools/pi-intercom",
+      });
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("loadConfig accepts inboundTrigger replies policy", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-intercom-config-"));
   try {
@@ -99,6 +131,19 @@ test("loadConfig rejects invalid inboundTrigger values", async () => {
         () => loadConfig(),
         /Failed to load intercom config.*"inboundTrigger" must be "always", "replies", or "never"/,
       );
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects empty cross-machine strings", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-intercom-config-"));
+  try {
+    mkdirSync(join(root, "intercom"), { recursive: true });
+    writeFileSync(join(root, "intercom", "config.json"), JSON.stringify({ crossMachine: { remoteCommand: "  " } }));
+    await withAgentDir(root, () => {
+      assert.throws(() => loadConfig(), /"crossMachine.remoteCommand" must be a non-empty string/);
     });
   } finally {
     rmSync(root, { recursive: true, force: true });

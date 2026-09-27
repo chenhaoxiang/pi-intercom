@@ -101,6 +101,19 @@ function isMessageProvenance(value: unknown): value is MessageProvenance {
     && typeof value.requestId === "string";
 }
 
+function isCrossMachineProvenance(value: unknown): boolean {
+  if (
+    !isRecord(value)
+    || value.type !== "ssh-relay"
+    || value.version !== 1
+    || value.trust !== "ssh-asserted"
+    || !isRecord(value.origin)
+  ) return false;
+  return typeof value.origin.name === "string"
+    && typeof value.origin.sessionId === "string"
+    && typeof value.origin.machine === "string";
+}
+
 export function isMessage(value: unknown): value is Message {
   if (!isRecord(value)) {
     return false;
@@ -135,6 +148,9 @@ export function isMessage(value: unknown): value is Message {
   if (value.provenance !== undefined && !isMessageProvenance(value.provenance)) {
     return false;
   }
+  if (value.crossMachine !== undefined && !isCrossMachineProvenance(value.crossMachine)) {
+    return false;
+  }
 
   if (!isRecord(value.content) || typeof value.content.text !== "string") {
     return false;
@@ -142,6 +158,21 @@ export function isMessage(value: unknown): value is Message {
 
   return value.content.attachments === undefined
     || (Array.isArray(value.content.attachments) && value.content.attachments.every(isAttachment));
+}
+
+/** Canonical authored-message identity used by the broker's replay guard. */
+export function messageDeliveryFingerprint(message: Message, targetId: string): string {
+  return JSON.stringify({
+    targetId,
+    text: message.content.text,
+    attachments: message.content.attachments,
+    replyTo: message.replyTo,
+    expectsReply: message.expectsReply,
+    supersedes: message.supersedes,
+    retryOf: message.retryOf,
+    provenance: message.provenance,
+    crossMachine: message.crossMachine,
+  });
 }
 
 export function isSessionInfo(value: unknown): value is SessionInfo {

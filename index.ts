@@ -33,6 +33,9 @@ import { resolve as resolvePath } from "node:path";
 import { sameCwd } from "./cwd.ts";
 import { formatContextUsage } from "./format-context.ts";
 import { openProjectPane, resolveTargetInCwd, waitForProjectSession, type ProjectPaneLaunch } from "./project-agent.ts";
+import { relaySenderName } from "./cross-machine-envelope.ts";
+import { sendCrossMachine } from "./cross-machine-transport.ts";
+import { parseCrossMachineTarget } from "./cross-machine-discovery.ts";
 
 const INTERCOM_TOOL_NAME = "intercom";
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
@@ -113,6 +116,25 @@ interface SupervisorInterviewReply {
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+export function explicitCrossMachineSendRestriction(options: {
+  to?: string;
+  cwd?: string;
+  openProjectPaneIfMissing?: boolean;
+  attachments?: readonly unknown[];
+  replyTo?: string;
+  supersedes?: string;
+  retryOf?: string;
+}): string | undefined {
+  if (!options.to?.includes("@")) return undefined;
+  if (options.cwd || options.openProjectPaneIfMissing) {
+    return "Cross-machine send does not support cwd or opening project panes.";
+  }
+  if (options.replyTo || options.supersedes || options.retryOf || options.attachments?.length) {
+    return "Cross-machine send only supports a new text message; attachments, reply relationships, supersede, and retry are not supported.";
+  }
+  return undefined;
 }
 
 function deliveryDetails(result: SendResult): Record<string, unknown> {
@@ -1228,7 +1250,9 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       : entry.replyCommand;
     const deliveredEntry = { ...entry, message: injectedMessage, replyCommand };
     replyTracker.queueTurnContext({ from: entry.from, message: injectedMessage, receivedAt: Date.now() });
-    const senderDisplay = entry.from.name || entry.from.id.slice(0, 8);
+    const senderDisplay = injectedMessage.crossMachine
+      ? `${relaySenderName(injectedMessage.crossMachine.origin)} · unverified cross-machine`
+      : entry.from.name || entry.from.id.slice(0, 8);
     const replyInstruction = replyCommand ? `\n\nTo reply, use the intercom tool: ${replyCommand}` : "";
     const deliveryMetadata = formatInboundDeliveryMetadata(injectedMessage);
     pi.sendMessage(
@@ -1327,9 +1351,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       ? formatAttachments(receivedMessage.content.attachments)
       : "";
     const bodyText = `${receivedMessage.content.text}${attachmentText}`;
-    const replyCommand = config.replyHint && receivedMessage.expectsReply
-      ? `intercom({ action: "reply", message: "..." })`
-      : undefined;
+    const replyCommand = config.replyHint && receivedMessage.crossMachine
+      ? `intercom({ action: "send", to: ${JSON.stringify(relaySenderName(receivedMessage.crossMachine.origin))}, message: "..." })`
+      : config.replyHint && receivedMessage.expectsReply
+        ? `intercom({ action: "reply", message: "..." })`
+        : undefined;
     replyTracker.recordIncomingMessage(from, receivedMessage, receiverReceivedAt);
     emitMessageReceipt(receivedMessage.id, "acknowledged", "accepted by receiver");
     const entry = { from, message: receivedMessage, replyCommand, bodyText };
@@ -2377,6 +2403,26 @@ Usage:
             };
           }
           try {
+            const crossMachineTarget = Boolean(to?.includes("@"));
+            const crossMachineRestriction = explicitCrossMachineSendRestriction({
+              to, cwd, openProjectPaneIfMissing, attachments, replyTo, supersedes, retryOf,
+            });
+            if (crossMachineRestriction) {
+              return {
+                content: [{ type: "text", text: crossMachineRestriction }],
+                details: { error: true, crossMachine: false },
+              };
+            }
+            if (crossMachineTarget) {
+              try {
+                parseCrossMachineTarget(to!);
+              } catch (error) {
+                return {
+                  content: [{ type: "text", text: getErrorMessage(error) }],
+                  details: { error: true, crossMachine: false },
+                };
+              }
+            }
             if (openProjectPaneIfMissing && !cwd) {
               return {
                 content: [{ type: "text", text: "openProjectPaneIfMissing requires a target cwd." }],
@@ -2394,6 +2440,43 @@ Usage:
                 return {
                   content: [{ type: "text", text: "Message cancelled by user" }],
                   details: {},
+                };
+              }
+            }
+            if (confirmSend && crossMachineTarget) {
+              const confirmed = await ctx.ui.confirm("Send message", `Send to "${to}":\n\n${message}`);
+              if (!confirmed) {
+                return {
+                  content: [{ type: "text", text: "Message cancelled by user" }],
+                  details: {},
+                };
+              }
+            }
+            if (crossMachineTarget) {
+              const identity = buildPresenceIdentity(pi, connectedClient.sessionId ?? ctx.sessionManager.getSessionId());
+              try {
+                const remote = await sendCrossMachine(to!, message, {
+                  name: identity.name,
+                  sessionId: connectedClient.sessionId ?? ctx.sessionManager.getSessionId(),
+                  machine: config.crossMachine.machineName,
+                }, {
+                  remoteCommand: config.crossMachine.remoteCommand,
+                });
+                const remoteTarget = relaySenderName({ name: remote.agent.name, machine: remote.machine.label });
+                pi.appendEntry("intercom_sent", {
+                  to: remoteTarget,
+                  message: { text: message },
+                  timestamp: Date.now(),
+                  crossMachine: true,
+                });
+                return {
+                  content: [{ type: "text", text: `Message sent to ${remoteTarget} over SSH (origin identity is SSH-asserted)` }],
+                  details: { delivered: true, crossMachine: true, machine: remote.machine.label, target: remote.agent.name, trust: "ssh-asserted" },
+                };
+              } catch (remoteError) {
+                return {
+                  content: [{ type: "text", text: `Explicit cross-machine message to "${to}" was not delivered: ${getErrorMessage(remoteError)}` }],
+                  details: { error: true, crossMachine: false },
                 };
               }
             }

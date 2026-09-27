@@ -51,6 +51,49 @@ test("expanded inline intercom messages show the full body without collapse cont
   assert.doesNotMatch(rendered, /Ctrl\+O/);
 });
 
+test("cross-machine messages label the asserted identity as unverified", () => {
+  const component = new InlineMessageComponent(from, {
+    ...message,
+    crossMachine: {
+      type: "ssh-relay",
+      version: 1,
+      origin: { name: "worker", sessionId: "00000000-0000-4000-8000-000000000001", machine: "laptop" },
+      trust: "ssh-asserted",
+    },
+  }, theme as any, 'intercom({ action: "send", to: "worker@laptop", message: "..." })');
+
+  const rendered = component.render(120).join("\n");
+  assert.match(rendered, /worker@laptop · unverified cross-machine/);
+  assert.match(rendered, /To send a new message to worker@laptop: intercom/);
+  assert.doesNotMatch(rendered, /To reply/);
+});
+
+test("collapsed cross-machine messages keep the unverified identity and new-message affordance explicit", () => {
+  const component = new InlineMessageComponent(from, {
+    ...message,
+    crossMachine: {
+      type: "ssh-relay",
+      version: 1,
+      origin: { name: "worker", sessionId: "00000000-0000-4000-8000-000000000001", machine: "laptop" },
+      trust: "ssh-asserted",
+    },
+  }, theme as any, 'intercom({ action: "send", to: "worker@laptop", message: "..." })', undefined, true);
+
+  const rendered = component.render(160).join("\n");
+  assert.match(rendered, /From: worker@laptop · unverified cross-machine/);
+  assert.match(rendered, /To send a new message to worker@laptop: intercom/);
+  assert.doesNotMatch(rendered, /To reply/);
+});
+
+test("local message header and reply affordance remain unchanged", () => {
+  const component = new InlineMessageComponent(from, message, theme as any, "intercom reply");
+
+  const rendered = component.render(100).join("\n");
+  assert.match(rendered, /From: sender \(\/tmp\/project\)/);
+  assert.match(rendered, /To reply: intercom reply/);
+  assert.doesNotMatch(rendered, /unverified cross-machine|To send a new message to/);
+});
+
 test("collapsed inline intercom messages keep preview, reply hint, and expand key visible", () => {
   const component = new InlineMessageComponent(
     from,

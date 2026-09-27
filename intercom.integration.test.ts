@@ -4385,6 +4385,68 @@ test("confirmSend still gates an inferred reply; cancellation preserves the pend
   });
 });
 
+test("confirmSend decline blocks explicit cross-machine transport after fail-closed validation", { concurrency: false }, async () => {
+  await withConfirmSendEnabled(async () => {
+    const { cleanup } = await setupClients();
+    const { default: piIntercomExtension } = await import("./index.ts");
+    const temp = mkdtempSync(path.join(repoDir, ".cross-machine-confirm-"));
+    const marker = path.join(temp, "transport-called");
+    const herdr = path.join(temp, "herdr");
+    const previousHerdrBin = process.env.HERDR_BIN_PATH;
+    writeFileSync(herdr, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\nexit 1\n`);
+    chmodSync(herdr, 0o755);
+    process.env.HERDR_BIN_PATH = herdr;
+    const confirmCalls: Array<[string, string]> = [];
+    const harness = createExtensionHarness("cross-machine-confirm-worker", {
+      hasUI: true,
+      ui: {
+        confirm: async (title: string, text: string) => {
+          confirmCalls.push([title, text]);
+          return false;
+        },
+      },
+    });
+
+    try {
+      piIntercomExtension(harness.pi as never);
+      await harness.emitLifecycle("session_start");
+      const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+
+      const unsupported = await intercomTool.execute("remote-unsupported", {
+        action: "send",
+        to: "reviewer@workstation",
+        message: "hello",
+        attachments: [{ type: "snippet", name: "note", content: "body" }],
+      }, new AbortController().signal, undefined, harness.ctx);
+      assert.equal(unsupported.details?.error, true);
+
+      const malformed = await intercomTool.execute("remote-malformed", {
+        action: "send",
+        to: "review er@workstation",
+        message: "hello",
+      }, new AbortController().signal, undefined, harness.ctx);
+      assert.equal(malformed.details?.error, true);
+      assert.equal(confirmCalls.length, 0);
+
+      const declined = await intercomTool.execute("remote-declined", {
+        action: "send",
+        to: "reviewer@workstation",
+        message: "hello",
+      }, new AbortController().signal, undefined, harness.ctx);
+      assert.equal(declined.content[0]?.text, "Message cancelled by user");
+      assert.equal(confirmCalls.length, 1);
+      assert.match(confirmCalls[0]![1], /reviewer@workstation/);
+      assert.equal(existsSync(marker), false);
+    } finally {
+      await harness.emitLifecycle("session_shutdown");
+      await cleanup();
+      if (previousHerdrBin === undefined) delete process.env.HERDR_BIN_PATH;
+      else process.env.HERDR_BIN_PATH = previousHerdrBin;
+      rmSync(temp, { recursive: true, force: true });
+    }
+  });
+});
+
 test("contact_supervisor progress_update stays unthreaded despite a pending ask; a later inferred send resolves it", { concurrency: false }, async () => {
   const { orchestrator, cleanup } = await setupClients();
 
