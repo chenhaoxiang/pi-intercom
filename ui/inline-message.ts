@@ -39,6 +39,9 @@ export class InlineMessageComponent implements Component {
     const senderName = this.message.crossMachine
       ? `${this.message.crossMachine.origin.name}@${this.message.crossMachine.origin.machine} · unverified cross-machine`
       : this.from.name || this.from.id.slice(0, 8);
+    const replyLabel = this.message.crossMachine
+      ? `To send a new message to ${this.message.crossMachine.origin.name}@${this.message.crossMachine.origin.machine}:`
+      : "To reply:";
     if (width < 3) {
       return [truncateToWidth(`From ${senderName}`, width)];
     }
@@ -64,7 +67,7 @@ export class InlineMessageComponent implements Component {
       lines.push(frameLine(this.theme.fg("text", this.collapsedPreview)));
 
       const meta: string[] = [];
-      if (this.replyCommand) meta.push(`To reply: ${this.replyCommand}`);
+      if (this.replyCommand) meta.push(`${replyLabel} ${this.replyCommand}`);
       if (this.message.content.attachments?.length) {
         const count = this.message.content.attachments.length;
         meta.push(`${count} attachment${count === 1 ? "" : "s"}`);
@@ -90,7 +93,7 @@ export class InlineMessageComponent implements Component {
 
     if (this.replyCommand) {
       lines.push(frameLine(""));
-      const replyLines = wrapTextWithAnsi(this.theme.fg("dim", ` To reply: ${this.replyCommand}`), bodyWidth);
+      const replyLines = wrapTextWithAnsi(this.theme.fg("dim", ` ${replyLabel} ${this.replyCommand}`), bodyWidth);
       for (const line of replyLines) {
         lines.push(frameLine(line));
       }
