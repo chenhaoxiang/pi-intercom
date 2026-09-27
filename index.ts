@@ -116,6 +116,25 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+export function explicitCrossMachineSendRestriction(options: {
+  to?: string;
+  cwd?: string;
+  openProjectPaneIfMissing?: boolean;
+  attachments?: readonly unknown[];
+  replyTo?: string;
+  supersedes?: string;
+  retryOf?: string;
+}): string | undefined {
+  if (!options.to?.includes("@")) return undefined;
+  if (options.cwd || options.openProjectPaneIfMissing) {
+    return "Cross-machine send does not support cwd or opening project panes.";
+  }
+  if (options.replyTo || options.supersedes || options.retryOf || options.attachments?.length) {
+    return "Cross-machine send only supports a new text message; attachments, reply relationships, supersede, and retry are not supported.";
+  }
+  return undefined;
+}
+
 function deliveryDetails(result: SendResult): Record<string, unknown> {
   return {
     messageId: result.id,
@@ -2382,6 +2401,16 @@ Usage:
             };
           }
           try {
+            const crossMachineTarget = Boolean(to?.includes("@"));
+            const crossMachineRestriction = explicitCrossMachineSendRestriction({
+              to, cwd, openProjectPaneIfMissing, attachments, replyTo, supersedes, retryOf,
+            });
+            if (crossMachineRestriction) {
+              return {
+                content: [{ type: "text", text: crossMachineRestriction }],
+                details: { error: true, crossMachine: false },
+              };
+            }
             if (openProjectPaneIfMissing && !cwd) {
               return {
                 content: [{ type: "text", text: "openProjectPaneIfMissing requires a target cwd." }],
@@ -2399,6 +2428,33 @@ Usage:
                 return {
                   content: [{ type: "text", text: "Message cancelled by user" }],
                   details: {},
+                };
+              }
+            }
+            if (crossMachineTarget) {
+              const identity = buildPresenceIdentity(pi, connectedClient.sessionId ?? ctx.sessionManager.getSessionId());
+              try {
+                const remote = await sendCrossMachine(to!, message, {
+                  name: identity.name,
+                  sessionId: connectedClient.sessionId ?? ctx.sessionManager.getSessionId(),
+                  machine: config.crossMachine.machineName,
+                }, {
+                  remoteCommand: config.crossMachine.remoteCommand,
+                });
+                pi.appendEntry("intercom_sent", {
+                  to: `${remote.agent.name}@${remote.machine.label}`,
+                  message: { text: message },
+                  timestamp: Date.now(),
+                  crossMachine: true,
+                });
+                return {
+                  content: [{ type: "text", text: `Message sent to ${remote.agent.name}@${remote.machine.label} over SSH (origin identity is SSH-asserted)` }],
+                  details: { delivered: true, crossMachine: true, machine: remote.machine.label, target: remote.agent.name, trust: "ssh-asserted" },
+                };
+              } catch (remoteError) {
+                return {
+                  content: [{ type: "text", text: `Explicit cross-machine message to "${to}" was not delivered: ${getErrorMessage(remoteError)}` }],
+                  details: { error: true, crossMachine: false },
                 };
               }
             }
@@ -2435,35 +2491,6 @@ Usage:
                 };
               }
             }
-            const explicitRemote = !cwd && Boolean(to?.includes("@")) && !replyTo && !supersedes && !retryOf && !attachments?.length;
-            if (explicitRemote) {
-              const identity = buildPresenceIdentity(pi, connectedClient.sessionId ?? ctx.sessionManager.getSessionId());
-              try {
-                const remote = await sendCrossMachine(to!, message, {
-                  name: identity.name,
-                  sessionId: connectedClient.sessionId ?? ctx.sessionManager.getSessionId(),
-                  machine: config.crossMachine.machineName,
-                }, {
-                  remoteCommand: config.crossMachine.remoteCommand,
-                  remoteCommandByMachine: config.crossMachine.remoteCommandByMachine,
-                });
-                pi.appendEntry("intercom_sent", {
-                  to: `${remote.agent.name}@${remote.machine.label}`,
-                  message: { text: message },
-                  timestamp: Date.now(),
-                  crossMachine: true,
-                });
-                return {
-                  content: [{ type: "text", text: `Message sent to ${remote.agent.name}@${remote.machine.label} over SSH (origin identity is SSH-asserted)` }],
-                  details: { delivered: true, crossMachine: true, machine: remote.machine.label, target: remote.agent.name, trust: "ssh-asserted" },
-                };
-              } catch (remoteError) {
-                return {
-                  content: [{ type: "text", text: `Explicit cross-machine message to "${to}" was not delivered: ${getErrorMessage(remoteError)}` }],
-                  details: { error: true, crossMachine: false },
-                };
-              }
-            }
             const result = await connectedClient.send(sendTo, {
               text: message,
               attachments,
@@ -2472,37 +2499,6 @@ Usage:
               retryOf,
             });
             if (!result.delivered) {
-              const canTryRemote = config.crossMachine.implicitFallback && result.code === "E_TARGET_NOT_FOUND"
-                && !cwd && Boolean(to) && !replyTo && !supersedes && !retryOf && !attachments?.length;
-              if (canTryRemote) {
-                const identity = buildPresenceIdentity(pi, connectedClient.sessionId ?? ctx.sessionManager.getSessionId());
-                try {
-                  const remote = await sendCrossMachine(to!, message, {
-                    name: identity.name,
-                    sessionId: connectedClient.sessionId ?? ctx.sessionManager.getSessionId(),
-                    machine: config.crossMachine.machineName,
-                  }, {
-                    remoteCommand: config.crossMachine.remoteCommand,
-                    remoteCommandByMachine: config.crossMachine.remoteCommandByMachine,
-                  });
-                  pi.appendEntry("intercom_sent", {
-                    to: `${remote.agent.name}@${remote.machine.label}`,
-                    message: { text: message },
-                    timestamp: Date.now(),
-                    crossMachine: true,
-                  });
-                  return {
-                    content: [{ type: "text", text: `Message sent to ${remote.agent.name}@${remote.machine.label} over SSH (origin identity is SSH-asserted)` }],
-                    details: { delivered: true, crossMachine: true, machine: remote.machine.label, target: remote.agent.name, trust: "ssh-asserted" },
-                  };
-                } catch (remoteError) {
-                  const localError = result.reason ?? "Session may not exist or has disconnected.";
-                  return {
-                    content: [{ type: "text", text: `Message to "${targetDisplay}" was not delivered locally (${localError}) or through saved Herdr machines: ${getErrorMessage(remoteError)}` }],
-                    details: { ...deliveryDetails(result), crossMachine: false },
-                  };
-                }
-              }
               const errorText = result.reason ?? "Session may not exist or has disconnected.";
               return {
                 content: [{ type: "text", text: `Message to "${targetDisplay}" was not delivered: ${errorText}` }],

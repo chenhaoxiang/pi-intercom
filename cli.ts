@@ -230,7 +230,12 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
       const envelope = relayEnvelope!;
       const result = await deps.client.send(envelope.target, {
         text: relayMessage(envelope),
-        crossMachine: { origin: envelope.origin, trust: envelope.trust },
+        crossMachine: {
+          type: "ssh-relay",
+          version: 1,
+          origin: envelope.origin,
+          trust: envelope.trust,
+        },
       });
       if (!result.delivered) return reportFailure(`relay delivery failed: ${result.reason ?? "unknown reason"}`);
       if (opts.json) out.write(`${JSON.stringify({ ok: true, delivered: true, id: result.id, origin: relaySenderName(envelope.origin), trust: envelope.trust })}\n`);
@@ -340,7 +345,6 @@ export async function runMain(argv: readonly string[] = process.argv.slice(2)): 
     machineName: config.crossMachine.machineName,
     crossMachineSend: (target, text, origin) => sendCrossMachine(target, text, origin, {
       remoteCommand: config.crossMachine.remoteCommand,
-      remoteCommandByMachine: config.crossMachine.remoteCommandByMachine,
     }),
   });
 }

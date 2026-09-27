@@ -417,11 +417,7 @@ Create `~/.pi/agent/intercom/config.json`:
   "status": "researching",
   "crossMachine": {
     "machineName": "laptop",
-    "implicitFallback": true,
-    "remoteCommand": "pi-intercom",
-    "remoteCommandByMachine": {
-      "workstation": "/usr/local/bin/pi-intercom"
-    }
+    "remoteCommand": "/usr/local/bin/pi-intercom"
   }
 }
 ```
@@ -437,9 +433,7 @@ Create `~/.pi/agent/intercom/config.json`:
 | `replyHint` | true | Include reply instruction in incoming messages |
 | `status` | — | Optional custom status suffix shown after the automatic lifecycle status, for example `thinking · researching` |
 | `crossMachine.machineName` | lowercased short hostname | Name peers use for this host in their Herdr saved-machine lists |
-| `crossMachine.implicitFallback` | true | Search enabled saved machines when an ordinary local `send` target is not found |
 | `crossMachine.remoteCommand` | `"pi-intercom"` | Command invoked through non-interactive SSH on remote machines |
-| `crossMachine.remoteCommandByMachine` | `{}` | Per-saved-machine-label command overrides |
 
 If `config.json` cannot be parsed or contains an invalid value, pi-intercom logs the error and fails closed for inbound broker auto-triggering by using `inboundTrigger: "never"` until the config is fixed.
 Obsolete `toolVisibility` values are ignored; the generic `intercom` tool remains stable in the active tool set for prompt-cache friendliness.
@@ -566,11 +560,11 @@ Because the CLI runs *on the machine that owns the broker*, you can bridge sessi
 ssh remote-host 'pi-intercom ask --to worker --text "done with the migration?"'
 ```
 
-For native cross-machine `send`, pi-intercom discovers enabled Herdr saved machines and relays through SSH while every broker remains local-only. An ordinary missing local target searches saved machines when `crossMachine.implicitFallback` is enabled. `reviewer@workstation` explicitly routes to the saved `workstation` machine; if that label is unknown, all enabled saved machines are searched for `reviewer`.
+For native cross-machine `send`, pi-intercom discovers an agent on an explicitly selected, enabled Herdr saved machine and relays through SSH while every broker remains local-only. Use `reviewer@workstation` (or a full session UUID followed by `@workstation`) to route to the saved `workstation` machine. Ordinary local targets never fall back to remote discovery, and unknown, disabled, or malformed machine entries fail closed.
 
-The relay carries structured SSH-asserted origin metadata. Incoming headers render `From worker@laptop · unverified cross-machine` and provide a `send` reply hint to that address. This identity is not cryptographically verified: anyone with SSH access that can invoke the relay can claim it. Callback verification or signed envelopes may be added later. Cross-machine `ask`, `replyTo`, attachments, supersede, and retry relationships are not supported in v1.
+The relay carries structured SSH-asserted origin metadata. Incoming headers render `From worker@laptop · unverified cross-machine` and provide a new-message `send` hint to that address. This identity is not cryptographically verified: anyone with SSH access that can invoke the relay can claim it. Cross-machine `ask`, `replyTo`, attachments, supersede, retry, cwd/project-pane routing, and lifecycle actions are not supported in v1.
 
-Discovery runs in parallel with a five-second timeout per saved machine; delivery has a fifteen-second timeout. Disabled machines are skipped, and not-found errors list unreachable machines. Remote hosts must provide a compatible `pi-intercom relay` command. Non-interactive SSH often has a minimal `PATH`; set `crossMachine.remoteCommand` or a `crossMachine.remoteCommandByMachine` entry to an absolute command when needed. Unknown relay versions and non-JSON responses produce an upgrade error.
+Discovery and delivery are bounded by five-second and fifteen-second timeouts respectively. Remote hosts must provide a compatible `pi-intercom relay` command. Non-interactive SSH often has a minimal `PATH`; set the trusted global `crossMachine.remoteCommand` to an absolute command when needed. Unknown relay versions and non-JSON responses produce an upgrade error.
 
 ## How It Works
 

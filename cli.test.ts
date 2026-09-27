@@ -269,6 +269,8 @@ test("runCli relay registers an ephemeral asserted sender and forwards the envel
   assert.equal(client.sends[0]?.to, "reviewer");
   assert.equal(client.sends[0]?.text, "[Unverified cross-machine origin]\nhello");
   assert.deepEqual(client.sends[0]?.crossMachine, {
+    type: "ssh-relay",
+    version: 1,
     origin: { name: "worker", sessionId: "00000000-0000-4000-8000-000000000001", machine: "laptop" },
     trust: "ssh-asserted",
   });

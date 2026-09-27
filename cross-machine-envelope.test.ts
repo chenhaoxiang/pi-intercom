@@ -43,6 +43,8 @@ test("message validation accepts structured cross-machine provenance", () => {
     id: "message-1",
     timestamp: 1,
     crossMachine: {
+      type: "ssh-relay",
+      version: 1,
       origin: { name: "worker", sessionId: fakeSessionId, machine: "laptop" },
       trust: "ssh-asserted",
     },

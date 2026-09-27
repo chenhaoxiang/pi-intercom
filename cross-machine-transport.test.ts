@@ -23,7 +23,7 @@ function discoveryResult(command: string, args: string[]) {
   return undefined;
 }
 
-test("discovers machines in parallel and sends hostile message text only on stdin", async () => {
+test("discovers only the selected machine and sends hostile message text only on stdin", async () => {
   const calls: Array<{ command: string; args: string[]; stdin?: string; timeoutMs?: number }> = [];
   let activeDiscovery = 0;
   let peakDiscovery = 0;
@@ -46,13 +46,13 @@ test("discovers machines in parallel and sends hostile message text only on stdi
     return { code: 0, stdout: '{"ok":true}', stderr: "" };
   };
   const hostileText = 'hello; $(touch /tmp/nope)\n"quoted" && exit 9';
-  const result = await sendCrossMachine("reviewer", hostileText, origin, {
+  const result = await sendCrossMachine("reviewer@workstation", hostileText, origin, {
     run,
     herdrBin: "herdr",
     remoteCommand: "/opt/pi tools/pi-intercom --profile trusted",
   });
   assert.equal(result.machine.label, "workstation");
-  assert.equal(peakDiscovery, 2);
+  assert.equal(peakDiscovery, 1);
   assert.equal(calls.some((call) => call.args.includes("disabled")), false);
   const ssh = calls.at(-1)!;
   assert.equal(ssh.command, "ssh");
@@ -71,7 +71,7 @@ test("rejects empty or control-character remote commands before invoking SSH", a
       return discoveryResult(command, args) ?? { code: 0, stdout: '{"ok":true}', stderr: "" };
     };
     await assert.rejects(
-      sendCrossMachine("reviewer", "hi", origin, { run, herdrBin: "herdr", remoteCommand }),
+      sendCrossMachine("reviewer@workstation", "hi", origin, { run, herdrBin: "herdr", remoteCommand }),
       /Remote command must/,
     );
     assert.equal(calls.includes("ssh"), false);
@@ -94,7 +94,7 @@ test("non-JSON and incompatible remote output report incompatible relay support"
   for (const stdout of ["", '{"ok":"yes"}', '{"version":2,"ok":true}']) {
     const run: CommandRunner = async (command, args) => discoveryResult(command, args) ?? { code: 1, stdout, stderr: "unknown command: relay" };
     await assert.rejects(
-      sendCrossMachine("reviewer", "hi", origin, { run, herdrBin: "herdr" }),
+      sendCrossMachine("reviewer@workstation", "hi", origin, { run, herdrBin: "herdr" }),
       /no compatible relay support and needs upgrading/,
     );
   }
@@ -107,7 +107,7 @@ test("structured remote failure preserves the reported error", async () => {
     stderr: "",
   };
   await assert.rejects(
-    sendCrossMachine("reviewer", "hi", origin, { run, herdrBin: "herdr" }),
+    sendCrossMachine("reviewer@workstation", "hi", origin, { run, herdrBin: "herdr" }),
     /Remote intercom delivery via workstation failed: target rejected the envelope version/,
   );
 });

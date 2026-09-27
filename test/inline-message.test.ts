@@ -55,6 +55,8 @@ test("cross-machine messages label the asserted identity as unverified", () => {
   const component = new InlineMessageComponent(from, {
     ...message,
     crossMachine: {
+      type: "ssh-relay",
+      version: 1,
       origin: { name: "worker", sessionId: "00000000-0000-4000-8000-000000000001", machine: "laptop" },
       trust: "ssh-asserted",
     },
@@ -70,6 +72,8 @@ test("collapsed cross-machine messages keep the unverified identity and new-mess
   const component = new InlineMessageComponent(from, {
     ...message,
     crossMachine: {
+      type: "ssh-relay",
+      version: 1,
       origin: { name: "worker", sessionId: "00000000-0000-4000-8000-000000000001", machine: "laptop" },
       trust: "ssh-asserted",
     },
