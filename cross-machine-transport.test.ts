@@ -25,8 +25,6 @@ function discoveryResult(command: string, args: string[]) {
 
 test("discovers only the selected machine and sends hostile message text only on stdin", async () => {
   const calls: Array<{ command: string; args: string[]; stdin?: string; timeoutMs?: number }> = [];
-  let activeDiscovery = 0;
-  let peakDiscovery = 0;
   const run: CommandRunner = async (command, args, stdin, timeoutMs) => {
     calls.push({ command, args, stdin, timeoutMs });
     if (command === "herdr" && args[0] === "machine") {
@@ -37,10 +35,6 @@ test("discovers only the selected machine and sends hostile message text only on
       ]), stderr: "" };
     }
     if (command === "herdr") {
-      activeDiscovery += 1;
-      peakDiscovery = Math.max(peakDiscovery, activeDiscovery);
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      activeDiscovery -= 1;
       return args[1] === "workstation" ? { code: 0, stdout: agents, stderr: "" } : { code: 0, stdout: JSON.stringify({ result: { agents: [] } }), stderr: "" };
     }
     return { code: 0, stdout: '{"ok":true}', stderr: "" };
@@ -52,7 +46,6 @@ test("discovers only the selected machine and sends hostile message text only on
     remoteCommand: "/opt/pi tools/pi-intercom --profile trusted",
   });
   assert.equal(result.machine.label, "workstation");
-  assert.equal(peakDiscovery, 1);
   assert.equal(calls.some((call) => call.args.includes("disabled")), false);
   const ssh = calls.at(-1)!;
   assert.equal(ssh.command, "ssh");

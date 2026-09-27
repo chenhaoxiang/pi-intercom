@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { hostname } from "os";
 import { getIntercomDirPath } from "./broker/paths.ts";
+import { defaultMachineName } from "./cross-machine-envelope.ts";
 
 const DEFAULT_ASK_TIMEOUT_MS = 10 * 60 * 1000;
 const INTERCOM_SCOPE_ID_ENV = "PI_INTERCOM_SCOPE_ID";
@@ -70,10 +71,6 @@ export function getConfigPath(intercomDir: string = getIntercomDirPath()): strin
   return join(intercomDir, "config.json");
 }
 
-function defaultMachineName(): string {
-  return hostname().split(".", 1)[0]!.toLowerCase();
-}
-
 const defaults: IntercomConfig = {
   brokerCommand: "npx",
   brokerArgs: ["--no-install", "tsx"],
@@ -83,7 +80,7 @@ const defaults: IntercomConfig = {
   enabled: true,
   replyHint: true,
   crossMachine: {
-    machineName: defaultMachineName(),
+    machineName: defaultMachineName(hostname()),
     remoteCommand: "pi-intercom",
   },
 };

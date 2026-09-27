@@ -137,8 +137,9 @@ test("parseCliArgs rejects invalid timeout values", () => {
 
 test("parseCliArgs requires --to and --text for send/ask", () => {
   assert.throws(() => parseCliArgs(["send", "--text", "hi"]), /--to is required/);
-  assert.throws(() => parseCliArgs(["send", "--to", "w"]), /--text or --text-stdin is required/);
-  assert.throws(() => parseCliArgs(["ask", "--to", "w"]), /--text or --text-stdin is required/);
+  assert.throws(() => parseCliArgs(["send", "--to", "w"]), /--text is required/);
+  assert.throws(() => parseCliArgs(["ask", "--to", "w"]), /--text is required/);
+  assert.throws(() => parseCliArgs(["send", "--to", "w", "--text-stdin", "ignored"]), /unknown option/);
 });
 
 test("parseCliArgs keeps relay hidden and restricted to an stdin envelope", () => {
@@ -212,11 +213,10 @@ test("runCli does not fall back to cross-machine send after local failure", asyn
   const out = new MemorySink();
   const err = new MemorySink();
   let attempted = false;
-  const code = await runCli(["send", "--to", "reviewer", "--text-stdin", "--name", "worker", "--json"], {
+  const code = await runCli(["send", "--to", "reviewer", "--text", "hello", "--name", "worker", "--json"], {
     client,
     out,
     err,
-    readStdin: async () => "hello",
     crossMachineSend: async () => {
       attempted = true;
       throw new Error("should not run");
@@ -385,7 +385,6 @@ test("packed artifact contains an executable pi-intercom bin and its runtime mod
     for (const path of [
       "cli.mjs",
       "cli.ts",
-      "cross-machine.ts",
       "cross-machine-discovery.ts",
       "cross-machine-envelope.ts",
       "cross-machine-transport.ts",

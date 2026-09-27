@@ -2,6 +2,7 @@ import type { Component } from "@earendil-works/pi-tui";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { SessionInfo, Message } from "../types.ts";
+import { relaySenderName } from "../cross-machine-envelope.ts";
 
 export class InlineMessageComponent implements Component {
   private from: SessionInfo;
@@ -36,11 +37,12 @@ export class InlineMessageComponent implements Component {
   render(width: number): string[] {
     const lines: string[] = [];
     const borderChar = "─";
-    const senderName = this.message.crossMachine
-      ? `${this.message.crossMachine.origin.name}@${this.message.crossMachine.origin.machine} · unverified cross-machine`
+    const remoteSender = this.message.crossMachine && relaySenderName(this.message.crossMachine.origin);
+    const senderName = remoteSender
+      ? `${remoteSender} · unverified cross-machine`
       : this.from.name || this.from.id.slice(0, 8);
-    const replyLabel = this.message.crossMachine
-      ? `To send a new message to ${this.message.crossMachine.origin.name}@${this.message.crossMachine.origin.machine}:`
+    const replyLabel = remoteSender
+      ? `To send a new message to ${remoteSender}:`
       : "To reply:";
     if (width < 3) {
       return [truncateToWidth(`From ${senderName}`, width)];

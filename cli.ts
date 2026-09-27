@@ -27,13 +27,12 @@ import {
   relayMessage,
   relaySenderName,
   resolveOrigin,
-  sendCrossMachine,
-  type CrossMachineDelivery,
   type CrossMachineEnvelope,
-} from "./cross-machine.ts";
+} from "./cross-machine-envelope.ts";
+import { sendCrossMachine, type CrossMachineDelivery } from "./cross-machine-transport.ts";
 import type { CrossMachineProvenance, Message, SessionInfo, SessionRegistration } from "./types.ts";
 
-export const CLI_USAGE = `usage: pi-intercom <list|send|ask> [--to <name|session-id>] [--text <message>|--text-stdin]
+export const CLI_USAGE = `usage: pi-intercom <list|send|ask> [--to <name|session-id>] [--text <message>]
                         [--timeout-ms <n>] [--name <session-name>] [--json]`;
 
 export const DEFAULT_ASK_TIMEOUT_MS = 120_000;
@@ -42,7 +41,6 @@ export interface CliOptions {
   command: "list" | "send" | "ask" | "relay";
   to: string | null;
   text: string | null;
-  textStdin: boolean;
   envelopeStdin: boolean;
   timeoutMs: number;
   name: string;
@@ -56,7 +54,6 @@ export function parseCliArgs(argv: readonly string[]): CliOptions {
     command: null as unknown as CliOptions["command"],
     to: null,
     text: null,
-    textStdin: false,
     envelopeStdin: false,
     timeoutMs: DEFAULT_ASK_TIMEOUT_MS,
     name: "pi-intercom-cli",
@@ -80,10 +77,6 @@ export function parseCliArgs(argv: readonly string[]): CliOptions {
     const arg = rest[i];
     if (arg === "--json") {
       opts.json = true;
-      continue;
-    }
-    if (arg === "--text-stdin") {
-      opts.textStdin = true;
       continue;
     }
     if (arg === "--envelope-stdin") {
@@ -113,17 +106,14 @@ export function parseCliArgs(argv: readonly string[]): CliOptions {
   }
 
   if (opts.command === "relay") {
-    if (!opts.envelopeStdin || opts.to || opts.text || opts.textStdin || opts.name !== "pi-intercom-cli") {
+    if (!opts.envelopeStdin || opts.to || opts.text || opts.name !== "pi-intercom-cli") {
       throw new CliUsageError(`relay requires only --envelope-stdin (and optional --json)\n${CLI_USAGE}`);
     }
   } else {
     if (opts.envelopeStdin) throw new CliUsageError(`--envelope-stdin is only valid for relay\n${CLI_USAGE}`);
-    if (opts.text && opts.textStdin) throw new CliUsageError("use either --text or --text-stdin, not both");
     if (opts.command !== "list") {
       if (!opts.to) throw new CliUsageError(`--to is required for ${opts.command}\n${CLI_USAGE}`);
-      if (!opts.text && !opts.textStdin) throw new CliUsageError(`--text or --text-stdin is required for ${opts.command}\n${CLI_USAGE}`);
-    } else if (opts.textStdin) {
-      throw new CliUsageError(`--text-stdin is only valid for send/ask\n${CLI_USAGE}`);
+      if (!opts.text) throw new CliUsageError(`--text is required for ${opts.command}\n${CLI_USAGE}`);
     }
   }
 
@@ -191,7 +181,6 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
   let relayEnvelope: CrossMachineEnvelope | undefined;
   try {
     opts = parseCliArgs(argv);
-    if (opts.textStdin) opts.text = await (deps.readStdin ?? readProcessStdin)();
     if (opts.command === "relay") {
       relayEnvelope = parseRelayEnvelope(await (deps.readStdin ?? readProcessStdin)());
       if (relayEnvelope.target.includes("@")) throw new CliUsageError("relay target must be a local name or session id");
@@ -250,7 +239,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
           const sessions = await deps.client.listSessions();
           const remote = await deps.crossMachineSend(opts.to as string, opts.text as string, resolveOrigin(sessions, opts.name, deps.machineName ?? "localhost", deps.client.sessionId));
           if (opts.json) out.write(`${JSON.stringify({ ok: true, delivered: true, crossMachine: true, machine: remote.machine.label, target: remote.agent.name })}\n`);
-          else out.write(`delivered to ${remote.agent.name}@${remote.machine.label} over SSH\n`);
+          else out.write(`delivered to ${relaySenderName({ name: remote.agent.name, machine: remote.machine.label })} over SSH\n`);
           return 0;
         } catch (error) {
           return reportFailure(`explicit cross-machine delivery failed: ${error instanceof Error ? error.message : String(error)}`);

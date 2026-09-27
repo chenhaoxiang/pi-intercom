@@ -83,7 +83,7 @@ export function parseRelayEnvelope(raw: string): CrossMachineEnvelope {
   return value as unknown as CrossMachineEnvelope;
 }
 
-export function relaySenderName(origin: CrossMachineOrigin): string {
+export function relaySenderName(origin: Pick<CrossMachineOrigin, "name" | "machine">): string {
   return `${origin.name}@${origin.machine}`;
 }
 

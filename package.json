@@ -13,7 +13,6 @@
     "cross-machine-discovery.ts",
     "cross-machine-envelope.ts",
     "cross-machine-transport.ts",
-    "cross-machine.ts",
     "index.ts",
     "types.ts",
     "config.ts",

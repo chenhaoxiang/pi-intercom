@@ -33,7 +33,8 @@ import { resolve as resolvePath } from "node:path";
 import { sameCwd } from "./cwd.ts";
 import { formatContextUsage } from "./format-context.ts";
 import { openProjectPane, resolveTargetInCwd, waitForProjectSession, type ProjectPaneLaunch } from "./project-agent.ts";
-import { sendCrossMachine } from "./cross-machine.ts";
+import { relaySenderName } from "./cross-machine-envelope.ts";
+import { sendCrossMachine } from "./cross-machine-transport.ts";
 
 const INTERCOM_TOOL_NAME = "intercom";
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
@@ -1249,7 +1250,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     const deliveredEntry = { ...entry, message: injectedMessage, replyCommand };
     replyTracker.queueTurnContext({ from: entry.from, message: injectedMessage, receivedAt: Date.now() });
     const senderDisplay = injectedMessage.crossMachine
-      ? `${injectedMessage.crossMachine.origin.name}@${injectedMessage.crossMachine.origin.machine} · unverified cross-machine`
+      ? `${relaySenderName(injectedMessage.crossMachine.origin)} · unverified cross-machine`
       : entry.from.name || entry.from.id.slice(0, 8);
     const replyInstruction = replyCommand ? `\n\nTo reply, use the intercom tool: ${replyCommand}` : "";
     const deliveryMetadata = formatInboundDeliveryMetadata(injectedMessage);
@@ -1350,7 +1351,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       : "";
     const bodyText = `${receivedMessage.content.text}${attachmentText}`;
     const replyCommand = config.replyHint && receivedMessage.crossMachine
-      ? `intercom({ action: "send", to: ${JSON.stringify(`${receivedMessage.crossMachine.origin.name}@${receivedMessage.crossMachine.origin.machine}`)}, message: "..." })`
+      ? `intercom({ action: "send", to: ${JSON.stringify(relaySenderName(receivedMessage.crossMachine.origin))}, message: "..." })`
       : config.replyHint && receivedMessage.expectsReply
         ? `intercom({ action: "reply", message: "..." })`
         : undefined;
@@ -2441,14 +2442,15 @@ Usage:
                 }, {
                   remoteCommand: config.crossMachine.remoteCommand,
                 });
+                const remoteTarget = relaySenderName({ name: remote.agent.name, machine: remote.machine.label });
                 pi.appendEntry("intercom_sent", {
-                  to: `${remote.agent.name}@${remote.machine.label}`,
+                  to: remoteTarget,
                   message: { text: message },
                   timestamp: Date.now(),
                   crossMachine: true,
                 });
                 return {
-                  content: [{ type: "text", text: `Message sent to ${remote.agent.name}@${remote.machine.label} over SSH (origin identity is SSH-asserted)` }],
+                  content: [{ type: "text", text: `Message sent to ${remoteTarget} over SSH (origin identity is SSH-asserted)` }],
                   details: { delivered: true, crossMachine: true, machine: remote.machine.label, target: remote.agent.name, trust: "ssh-asserted" },
                 };
               } catch (remoteError) {
