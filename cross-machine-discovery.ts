@@ -1,4 +1,5 @@
-const SESSION_ID_IN_PATH = /_([0-9a-f]{8}-[0-9a-f-]{27,})\.jsonl$/i;
+const FULL_SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SESSION_ID_IN_PATH = /_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i;
 export const DISCOVERY_TIMEOUT_MS = 5_000;
 
 export interface SavedMachine {
@@ -63,39 +64,55 @@ export function parseRemoteAgents(raw: string): RemoteAgent[] {
   });
 }
 
-function splitExplicitMachine(target: string, machines: SavedMachine[]): { agentTarget: string; machines: SavedMachine[] } {
-  const at = target.lastIndexOf("@");
-  if (at <= 0) return { agentTarget: target, machines };
-  const agentTarget = target.slice(0, at);
-  const label = target.slice(at + 1).toLowerCase();
-  const selected = machines.filter((machine) => machine.label.toLowerCase() === label);
-  return { agentTarget, machines: selected.length ? selected : machines };
+function parseExplicitTarget(target: string): { agentTarget: string; machineLabel: string } {
+  const parts = target.split("@");
+  if (parts.length !== 2 || !parts[0] || !parts[1] || parts.some((part) => part !== part.trim())) {
+    throw new Error(`Invalid remote target "${target}"; expected name@machine or full-session-uuid@machine.`);
+  }
+  return { agentTarget: parts[0], machineLabel: parts[1] };
 }
 
 export async function discoverRemoteAgent(target: string, deps: DiscoveryDeps): Promise<DiscoveredRemoteAgent> {
+  const explicit = parseExplicitTarget(target);
   const discoveryTimeoutMs = deps.discoveryTimeoutMs ?? DISCOVERY_TIMEOUT_MS;
   const listed = await deps.run(deps.herdrBin, ["machine", "list", "--json"], undefined, discoveryTimeoutMs);
   if (listed.code !== 0) throw new Error(`Could not list Herdr saved machines: ${listed.timedOut ? "timed out" : listed.stderr.trim() || `exit ${listed.code}`}`);
-  const available = parseSavedMachines(listed.stdout).filter((machine) => machine.enabled);
-  const explicit = splitExplicitMachine(target, available);
+  const selected = parseSavedMachines(listed.stdout).filter((machine) => (
+    machine.enabled && machine.label.toLowerCase() === explicit.machineLabel.toLowerCase()
+  ));
+  if (selected.length === 0) {
+    throw new Error(`Saved Herdr machine "${explicit.machineLabel}" is unknown or disabled.`);
+  }
+  if (selected.length > 1) {
+    throw new Error(`Saved Herdr machine label "${explicit.machineLabel}" is ambiguous; expected exactly one enabled machine.`);
+  }
 
-  const discovered = await Promise.all(explicit.machines.map(async (machine) => {
-    const result = await deps.run(deps.herdrBin, ["--machine", machine.label, "agent", "list"], undefined, discoveryTimeoutMs);
-    if (result.code !== 0) return { machine, agents: [] as RemoteAgent[], unreachable: true };
-    try {
-      return { machine, agents: parseRemoteAgents(result.stdout), unreachable: false };
-    } catch {
-      return { machine, agents: [] as RemoteAgent[], unreachable: true };
-    }
-  }));
+  const machine = selected[0]!;
+  const result = await deps.run(deps.herdrBin, ["--machine", machine.label, "agent", "list"], undefined, discoveryTimeoutMs);
+  if (result.code !== 0) {
+    const detail = result.timedOut ? "timed out" : result.stderr.trim() || `exit ${result.code}`;
+    throw new Error(`Saved Herdr machine "${machine.label}" is unreachable: ${detail}.`);
+  }
+  let agents: RemoteAgent[];
+  try {
+    agents = parseRemoteAgents(result.stdout);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "invalid response";
+    throw new Error(`Saved Herdr machine "${machine.label}" is unreachable: ${detail}`);
+  }
 
-  const matches = discovered.flatMap(({ machine, agents }) => agents
-    .filter((agent) => agent.name.toLowerCase() === explicit.agentTarget.toLowerCase() || agent.sessionId === explicit.agentTarget)
-    .map((agent) => ({ machine, agent })));
-  const unreachable = discovered.filter((entry) => entry.unreachable).map((entry) => entry.machine.label);
-  const unreachableSuffix = unreachable.length ? ` Unreachable machines: ${unreachable.join(", ")}.` : "";
-  if (matches.length === 0) throw new Error(`No saved Herdr machine has a live Pi agent matching "${target}".${unreachableSuffix}`);
-  if (matches.length > 1) throw new Error(`Multiple saved Herdr machines have an agent matching "${target}"; use name@machine.`);
+  const bySessionId = FULL_SESSION_UUID.test(explicit.agentTarget);
+  const matches = agents
+    .filter((agent) => bySessionId
+      ? agent.sessionId === explicit.agentTarget
+      : agent.name.toLowerCase() === explicit.agentTarget.toLowerCase())
+    .map((agent) => ({ machine, agent }));
+  if (matches.length === 0) {
+    throw new Error(`No live Pi agent on saved Herdr machine "${machine.label}" exactly matches "${explicit.agentTarget}".`);
+  }
+  if (matches.length > 1) {
+    throw new Error(`Multiple live Pi agents on saved Herdr machine "${machine.label}" exactly match "${explicit.agentTarget}"; target is ambiguous.`);
+  }
 
   return matches[0]!;
 }
