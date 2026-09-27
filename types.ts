@@ -71,6 +71,8 @@ export interface CrossMachineOrigin {
 }
 
 export interface CrossMachineProvenance {
+  type: "ssh-relay";
+  version: 1;
   origin: CrossMachineOrigin;
   trust: "ssh-asserted";
 }
