@@ -4,23 +4,25 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-30
+
 ### Highlights
-- Hand your work to another session with `/handover`. The current model writes up what this session learned, decided, and changed, and the receiving session starts on the next task without rediscovering any of it.
-- Hand over to Pi sessions on your other computers. The `/handover` picker lists this machine's sessions and, when you ask, the Pi sessions on your saved Herdr machines, then sends the handover over SSH.
+- Hand your work to another session with `/handover`. Pi writes up what this session learned, decided, and changed, and the other session picks up the next task without starting from scratch.
+- Hand over to Pi sessions on your other computers. The `/handover` picker lists sessions on this machine and, when you ask, on your saved Herdr machines.
 - Press `h` in the Alt+M session list to hand over to the highlighted session.
-- The Windows broker starts without the VBScript helper that endpoint security tools flagged.
+- On Windows, the broker no longer starts through a VBScript file that security tools flagged, and opening a Herdr project pane now starts Pi.
 
 ### Added
-- Hand your current session's context over to another session with `/handover <target> [next task]` or the intercom tool's `handover` action. The current model summarizes what the session learned, decided, and changed, and the receiving session starts on the next task. `/handover` lets you edit the summary before it is sent, a project path opens a Herdr pane when no session is running there, and `name@machine` targets on saved Herdr machines are supported.
-- Run `/handover` with no arguments to pick the receiving session from a list of this machine's sessions, start a new session in a project, or fetch Pi sessions from your other Herdr machines. Press `h` in the Alt+M session list to hand over to the highlighted session.
+- `/handover <target> [next task]` and the intercom tool's `handover` action hand your session's context to another session. Pi summarizes what the session learned, decided, and changed, and the receiving session starts on the next task. You can edit the summary before sending it. If you give a project path and no session is running there, a Herdr pane opens one. `name@machine` targets on saved Herdr machines work too.
+- `/handover` with no arguments opens a picker. Choose a session on this machine, start a new session in a project, or load Pi sessions from your other Herdr machines. In the Alt+M session list, press `h` to hand over to the highlighted session.
 
 ### Changed
-- Windows no longer writes and runs a `broker-launch.vbs` helper to start the broker, which endpoint security tools flagged as suspicious. The broker now runs as a single hidden Node process with the bundled `tsx` loader on every platform, and Windows startup failures now include broker stderr. Custom `brokerCommand` values on Windows must name an executable rather than a `.cmd` shim. Thanks to [@jhonruda25](https://github.com/jhonruda25) for issue #142.
+- On Windows, the broker no longer starts through a `broker-launch.vbs` file, which endpoint security tools flagged as suspicious. It now runs as one hidden Node process, the same way as on other platforms, and a failed start shows the broker's error output. If you set a custom `brokerCommand` on Windows, it must point to an executable, not a `.cmd` shim. Thanks to [@jhonruda25](https://github.com/jhonruda25) for issue #142.
 
 ### Fixed
-- Cross-machine sends can now reach Pi sessions on another machine that were never renamed in Herdr. Address them as `full-session-uuid@machine`; before, only renamed sessions were found.
-- Opening a Herdr project pane now starts Pi on Windows. The launch command was sent to the pane wrapped in quotes, which PowerShell prints as text instead of running. Thanks to [@elliot-chung](https://github.com/elliot-chung) for #143.
-- When another machine can't be reached, the error now shows Herdr's actual reason instead of its raw debug output, and says how to update a remote Herdr server that is too old for cross-machine listing.
+- You can now send to Pi sessions on another machine even if they were never renamed in Herdr. Address them as `full-session-uuid@machine`. Before, only renamed sessions could be found.
+- Opening a Herdr project pane now starts Pi on Windows. The command was sent in quotes, and PowerShell printed it as text instead of running it. Thanks to [@elliot-chung](https://github.com/elliot-chung) for #143.
+- When another machine can't be reached, the error now shows Herdr's reason instead of raw debug output. If that machine's Herdr server is too old to list sessions, the error says how to update it.
 
 ## [0.15.0] - 2026-09-27
 
