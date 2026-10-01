@@ -118,28 +118,22 @@ export class ReplyTracker {
       }
     }
 
+    if (pending.length > 1) {
+      throw new Error("Multiple pending asks — specify `replyTo` or `to`");
+    }
+    if (pending.length === 1) {
+      return pending[0]!;
+    }
+
     if (currentContext?.message.expectsReply) {
-      if (!this.pendingAsks.has(currentContext.message.id)) {
-        throw new Error(`Current ask "${currentContext.message.id}" is expired or no longer pending — specify a pending \`replyTo\``);
-      }
-      if (pending.length > 1) {
-        throw new Error("Multiple pending asks — specify `replyTo` or `to`");
-      }
-      return this.pendingAsks.get(currentContext.message.id)!;
+      throw new Error(`Current ask "${currentContext.message.id}" is expired or no longer pending — specify a pending \`replyTo\``);
     }
 
     if (this.currentTurnContext) {
       return this.currentTurnContext;
     }
 
-    if (pending.length === 1) {
-      return pending[0]!;
-    }
-    if (pending.length === 0) {
-      throw new Error("No active intercom context to reply to");
-    }
-
-    throw new Error("Multiple pending asks — specify `replyTo` or `to`");
+    throw new Error("No active intercom context to reply to");
   }
 
   findUniquePendingAskFrom(to: string, now = Date.now()): IntercomContext | null {

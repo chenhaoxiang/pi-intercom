@@ -3660,6 +3660,47 @@ test("intercom reply targets exact replyTo when multiple asks are pending", { co
   }
 });
 
+test("reply without selectors prioritizes one pending ask over an ordinary current turn", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("pending-priority-worker", { hasUI: true, isIdle: () => true });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const worker = await waitForSessionByName(planner, "pending-priority-worker");
+    assert.equal((await planner.send(worker.id, {
+      messageId: "priority-ask",
+      text: "Please answer me.",
+      expectsReply: true,
+    })).delivered, true);
+    assert.equal((await orchestrator.send(worker.id, {
+      messageId: "priority-ordinary",
+      text: "An unrelated status update.",
+    })).delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(harness.sentMessages.length, 2);
+
+    await harness.emitLifecycle("turn_start");
+    await harness.emitLifecycle("turn_start");
+    const replyReceived = waitForReply(planner, "priority-ask");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const result = await intercomTool.execute("priority-reply", {
+      action: "reply",
+      message: "Answering the ask, not the status update.",
+    }, new AbortController().signal, undefined, harness.ctx);
+
+    assert.equal(result.details?.delivered, true);
+    assert.equal(result.details?.replyTo, "priority-ask");
+    assert.equal((await replyReceived).message.replyTo, "priority-ask");
+    const pending = await intercomTool.execute("priority-pending", { action: "pending" }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(pending.content[0]?.text, "No unresolved inbound asks.");
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("intercom reply responds safely to an ordinary inbound message", { concurrency: false }, async () => {
   const { planner, cleanup } = await setupClients();
   const { default: piIntercomExtension } = await import("./index.ts");
@@ -3775,6 +3816,7 @@ test("failed ordinary-message delivery preserves an unrelated pending ask", { co
     const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
     const first = await intercomTool.execute("ordinary-delivery-first", {
       action: "reply",
+      to: "orchestrator",
       message: "First response.",
     }, new AbortController().signal, undefined, harness.ctx);
     assert.equal(first.details?.delivered, true);
@@ -3782,6 +3824,7 @@ test("failed ordinary-message delivery preserves an unrelated pending ask", { co
 
     const failed = await intercomTool.execute("ordinary-delivery-failed", {
       action: "reply",
+      to: "orchestrator",
       message: "Changed response.",
     }, new AbortController().signal, undefined, harness.ctx);
     assert.equal(failed.details?.delivered, false);

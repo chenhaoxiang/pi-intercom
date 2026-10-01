@@ -56,15 +56,16 @@ test("reply resolves an ordinary current-turn message only with its explicit sen
   assert.throws(() => tracker.resolveReplyTarget({ to: "reviewer" }, 1002), /No pending ask from "reviewer"/);
 });
 
-test("ordinary current-turn reply wins over an unrelated pending ask", () => {
+test("single pending ask wins over an ordinary current-turn context", () => {
   const tracker = new ReplyTracker();
   tracker.recordIncomingMessage(createSession("reviewer-id", "reviewer"), createMessage("ask-1", "Need a decision"), 1000);
   const ordinary = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("message-1", "Status update", false), 1001);
   tracker.queueTurnContext(ordinary);
   tracker.beginTurn(1002);
 
-  assert.equal(tracker.resolveReplyTarget({}, 1003).message.id, "message-1");
-  assert.deepEqual(tracker.listPending(1003).map((context) => context.message.id), ["ask-1"]);
+  assert.equal(tracker.resolveReplyTarget({}, 1003).message.id, "ask-1");
+  tracker.markReplied("ask-1");
+  assert.deepEqual(tracker.listPending(1003), []);
 });
 
 test("explicit ordinary-message replyTo is rejected without falling back", () => {
@@ -236,15 +237,14 @@ test("same-sender asks cannot fall back to the current ask after ambiguous to", 
   assert.throws(() => tracker.resolveReplyTarget({ to: "planner" }, 1003), /Multiple pending asks match sender name/);
 });
 
-test("expired current ask cannot fall back to another pending ask", () => {
+test("expired current ask yields the sole remaining pending ask", () => {
   const tracker = new ReplyTracker(10);
   const current = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "First"), 1000);
   tracker.recordIncomingMessage(createSession("reviewer-id", "reviewer"), createMessage("ask-2", "Second"), 1005);
   tracker.queueTurnContext(current);
   tracker.beginTurn(1006);
 
-  assert.throws(() => tracker.resolveReplyTarget({}, 1011), /Current ask "ask-1" is expired or no longer pending/);
-  assert.equal(tracker.resolveReplyTarget({ replyTo: "ask-2" }, 1011).from.id, "reviewer-id");
+  assert.equal(tracker.resolveReplyTarget({}, 1011).message.id, "ask-2");
 });
 
 test("non-pending queued ask contexts cannot be replied to", () => {
