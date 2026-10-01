@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkS
 import { join } from "path";
 import { createHash, randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
-import { isMessage, isMessageReceipt, isSessionId, isSessionRegistration, messageDeliveryFingerprint } from "./protocol.ts";
+import { isMessage, isMessageReceipt, isPendingAsk, isSessionId, isSessionRegistration, messageDeliveryFingerprint } from "./protocol.ts";
 import {
   ensureIntercomRuntimeDir,
   getBrokerListenTarget,
@@ -18,8 +18,8 @@ import {
 } from "./paths.ts";
 import { getAskTimeoutMs } from "../config.ts";
 import { sameCwd } from "../cwd.ts";
-import { EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE } from "../types.ts";
-import type { DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl } from "../types.ts";
+import { EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, PENDING_ASKS_FEATURE } from "../types.ts";
+import type { DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl, PendingAsk } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
 import { assertNoLiveBroker } from "./runtime-claim.ts";
 import { resolveHerdrLocations } from "../herdr-location.ts";
@@ -100,15 +100,7 @@ interface AskEdge {
   createdAt: number;
 }
 
-interface PendingAskRecord {
-  askId: string;
-  messageId: string;
-  asker: { sessionId: string; name: string | null };
-  target: { sessionId: string; name: string | null };
-  question: string;
-  createdAt: number;
-  expiresAt: number;
-}
+interface PendingAskRecord extends PendingAsk {}
 
 interface MessageReceiptRoute {
   from: string;
@@ -177,19 +169,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isPendingAskRecord(value: unknown): value is PendingAskRecord {
-  if (!isRecord(value) || !isRecord(value.asker) || !isRecord(value.target)) {
-    return false;
-  }
-  return typeof value.askId === "string"
-    && typeof value.messageId === "string"
-    && typeof value.asker.sessionId === "string"
-    && (typeof value.asker.name === "string" || value.asker.name === null)
-    && typeof value.target.sessionId === "string"
-    && (typeof value.target.name === "string" || value.target.name === null)
-    && typeof value.question === "string"
-    && Number.isSafeInteger(value.createdAt)
-    && Number.isSafeInteger(value.expiresAt)
-    && value.expiresAt >= value.createdAt;
+  return isPendingAsk(value);
 }
 
 function pendingAskRecordPath(messageId: string): string {
@@ -206,6 +186,7 @@ function ensurePendingAskRecordDir(): void {
 class IntercomBroker {
   private sessions = new Map<string, ConnectedSession>();
   private askEdges = new Map<string, AskEdge>();
+  private ambiguousAskEdges = new Set<string>();
   private messageReceiptRoutes = new Map<string, MessageReceiptRoute>();
   private disconnectedSessions = new Map<string, DisconnectedSession>();
   private mailboxMessages: MailboxMessage[] = [];
@@ -224,6 +205,7 @@ class IntercomBroker {
     assertNoLiveBroker(PID_PATH);
     ensurePendingAskRecordDir();
     this.prunePendingAskRecords();
+    this.rehydratePendingAskEdges();
     this.extensionStateManager = new ExtensionStateManager(INTERCOM_DIR);
     if (typeof LISTEN_TARGET === "string" && process.platform !== "win32") {
       try {
@@ -505,7 +487,7 @@ class IntercomBroker {
         writeMessage(socket, {
           type: "registered",
           sessionId: id,
-          features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE],
+          features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, PENDING_ASKS_FEATURE],
         });
         this.broadcast({ type: "session_joined", session: info }, key, scopeId);
 
@@ -622,6 +604,23 @@ class IntercomBroker {
             }));
             writeMessage(socket, { type: "sessions", requestId, sessions: fallback });
           });
+        break;
+      }
+
+      case "pending_asks": {
+        if (typeof clientMessage.requestId !== "string" || clientMessage.version !== 1) {
+          throw new Error("Invalid pending_asks message");
+        }
+        const requester = currentKey ? this.sessions.get(currentKey) : undefined;
+        if (!requester || requester.socket !== socket) {
+          throw new Error("Pending ask session not found");
+        }
+        writeMessage(socket, {
+          type: "pending_asks",
+          requestId: clientMessage.requestId,
+          version: 1,
+          asks: this.listPendingAskRecords(requester.info.id, requester.scopeId),
+        });
         break;
       }
 
@@ -1205,6 +1204,7 @@ class IntercomBroker {
       messageId: message.id,
       asker: { sessionId: from.info.id, name: from.info.name ?? null },
       target: { sessionId: target.id, name: target.name ?? null },
+      ...(from.scopeId ? { scopeId: from.scopeId } : {}),
       question: message.content.text,
       createdAt,
       expiresAt: createdAt + this.askTimeoutMs,
@@ -1224,6 +1224,70 @@ class IntercomBroker {
     }
   }
 
+  private rehydratePendingAskEdges(now = Date.now()): void {
+    for (const entry of readdirSync(PENDING_ASKS_DIR, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      const filePath = join(PENDING_ASKS_DIR, entry.name);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(readFileSync(filePath, "utf-8"));
+      } catch {
+        continue;
+      }
+      if (!isPendingAskRecord(parsed) || now > parsed.expiresAt) continue;
+      const expectedPath = parsed.scopeId
+        ? scopedPendingAskRecordPath(parsed.scopeId, parsed.messageId)
+        : pendingAskRecordPath(parsed.messageId);
+      // A pre-scope record found under a scoped filename, or a record whose
+      // scope does not match its filename, cannot be safely routed.
+      if (filePath !== expectedPath) continue;
+      if (this.ambiguousAskEdges.has(parsed.messageId)) continue;
+      if (this.askEdges.has(parsed.messageId)) {
+        // The message id is global on the wire. Duplicate durable records in
+        // different scopes are ambiguous, so fail closed instead of choosing.
+        this.askEdges.delete(parsed.messageId);
+        this.ambiguousAskEdges.add(parsed.messageId);
+        continue;
+      }
+      this.askEdges.set(parsed.messageId, {
+        from: scopedSessionKey(parsed.scopeId, parsed.asker.sessionId),
+        to: scopedSessionKey(parsed.scopeId, parsed.target.sessionId),
+        ...(parsed.scopeId ? { scopeId: parsed.scopeId } : {}),
+        createdAt: parsed.createdAt,
+      });
+    }
+  }
+
+  private listPendingAskRecords(sessionId: string, scopeId?: string): PendingAsk[] {
+    const records = new Map<string, PendingAsk>();
+    const ambiguous = new Set<string>();
+    for (const entry of readdirSync(PENDING_ASKS_DIR, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(readFileSync(join(PENDING_ASKS_DIR, entry.name), "utf-8"));
+      } catch {
+        continue;
+      }
+      if (!isPendingAskRecord(parsed) || Date.now() > parsed.expiresAt) continue;
+      const expectedPath = parsed.scopeId
+        ? scopedPendingAskRecordPath(parsed.scopeId, parsed.messageId)
+        : pendingAskRecordPath(parsed.messageId);
+      if (join(PENDING_ASKS_DIR, entry.name) !== expectedPath) continue;
+      if (ambiguous.has(parsed.messageId)) continue;
+      if (records.has(parsed.messageId)) {
+        records.delete(parsed.messageId);
+        ambiguous.add(parsed.messageId);
+        continue;
+      }
+      records.set(parsed.messageId, parsed);
+    }
+    return [...records.values()]
+      .filter((ask) => ask.scopeId === scopeId)
+      .filter((ask) => ask.asker.sessionId === sessionId || ask.target.sessionId === sessionId)
+      .sort((a, b) => a.createdAt - b.createdAt);
+  }
+
   private prunePendingAskRecords(now = Date.now()): void {
     ensurePendingAskRecordDir();
     for (const entry of readdirSync(PENDING_ASKS_DIR, { withFileTypes: true })) {
@@ -1238,7 +1302,10 @@ class IntercomBroker {
         unlinkSync(filePath);
         continue;
       }
-      if (!isPendingAskRecord(parsed) || now > parsed.expiresAt) {
+      const expectedPath = isPendingAskRecord(parsed)
+        ? (parsed.scopeId ? scopedPendingAskRecordPath(parsed.scopeId, parsed.messageId) : pendingAskRecordPath(parsed.messageId))
+        : null;
+      if (!isPendingAskRecord(parsed) || expectedPath !== filePath || now > parsed.expiresAt) {
         unlinkSync(filePath);
       }
     }
@@ -1709,6 +1776,7 @@ class IntercomBroker {
     }
     this.sessions.clear();
     this.askEdges.clear();
+    this.ambiguousAskEdges.clear();
     this.messageReceiptRoutes.clear();
     this.disconnectedSessions.clear();
     this.mailboxMessages.length = 0;

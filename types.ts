@@ -1,5 +1,6 @@
 export const EXTENSION_BUS_FEATURE = "extension-bus-v1";
 export const EXACT_SEND_FEATURE = "exact-send-v1";
+export const PENDING_ASKS_FEATURE = "pending-asks-v1";
 
 export type DeliveryState = "socket_delivered" | "queued" | "failed" | "unknown";
 
@@ -26,6 +27,22 @@ export type HerdrLocation =
       reason: "herdr_unavailable" | "unsupported" | "command_failed" | "pane_missing" | "invalid_response";
       detail?: string;
     };
+
+export interface PendingAskParticipant {
+  sessionId: string;
+  name: string | null;
+}
+
+export interface PendingAsk {
+  askId: string;
+  messageId: string;
+  asker: PendingAskParticipant;
+  target: PendingAskParticipant;
+  question: string;
+  createdAt: number;
+  expiresAt: number;
+  scopeId?: string;
+}
 
 export interface SessionInfo {
   id: string;
@@ -146,6 +163,7 @@ export type ClientMessage =
   | { type: "unregister" }
   | { type: "extension_capabilities_update"; extensions: ExtensionCapability[] }
   | { type: "list"; requestId: string }
+  | { type: "pending_asks"; requestId: string; version: 1 }
   | { type: "send"; to: string; message: Message; targetId?: string; targetEpoch?: string }
   | { type: "message_receipt"; receipt: MessageReceipt }
   | { type: "cancel_message"; messageId: string }
@@ -170,6 +188,7 @@ export type ClientMessage =
 export type BrokerMessage =
   | { type: "registered"; sessionId: string; features?: string[] }
   | { type: "sessions"; requestId: string; sessions: SessionInfo[] }
+  | { type: "pending_asks"; requestId: string; version: 1; asks: PendingAsk[] }
   | { type: "message"; from: SessionInfo; message: Message }
   | { type: "presence_update"; session: SessionInfo }
   | { type: "session_joined"; session: SessionInfo }

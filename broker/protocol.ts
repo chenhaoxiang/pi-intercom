@@ -5,12 +5,28 @@ import type {
   MessageProvenance,
   MessageReceipt,
   MessageReceiptStatus,
+  PendingAsk,
   SessionInfo,
   SessionRegistration,
 } from "../types.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function isPendingAsk(value: unknown): value is PendingAsk {
+  if (!isRecord(value) || !isRecord(value.asker) || !isRecord(value.target)) return false;
+  return typeof value.messageId === "string"
+    && value.askId === value.messageId
+    && isSessionId(value.asker.sessionId)
+    && (typeof value.asker.name === "string" || value.asker.name === null)
+    && isSessionId(value.target.sessionId)
+    && (typeof value.target.name === "string" || value.target.name === null)
+    && typeof value.question === "string"
+    && Number.isSafeInteger(value.createdAt)
+    && Number.isSafeInteger(value.expiresAt)
+    && Number(value.expiresAt) >= Number(value.createdAt)
+    && (value.scopeId === undefined || (typeof value.scopeId === "string" && value.scopeId.trim().length > 0 && value.scopeId === value.scopeId.trim()));
 }
 
 function isHerdrLocation(value: unknown): boolean {

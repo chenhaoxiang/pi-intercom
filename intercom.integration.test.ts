@@ -403,7 +403,7 @@ test("opt-in TCP broker requires endpoint state for health and registration", { 
     assert.deepEqual(registerMessages, [{
       type: "registered",
       sessionId: "authorized-tcp-client",
-      features: ["extension-bus-v1", "exact-send-v1"],
+      features: ["extension-bus-v1", "exact-send-v1", "pending-asks-v1"],
     }]);
   } finally {
     if (broker.exitCode === null && broker.signalCode === null) {
@@ -415,7 +415,11 @@ test("opt-in TCP broker requires endpoint state for health and registration", { 
 });
 
 async function setupClients() {
-  const broker = spawn(process.execPath, [...tsxImportArgs, path.join(repoDir, "broker", "broker.ts")], {
+  // Each fixture owns its runtime state. Durable ask records are deliberately
+  // retained across a broker restart within one test, but must not leak into
+  // the next isolated fixture (which may reuse a stable session id).
+  rmSync(path.join(sharedHomeDir, ".pi", "agent", "intercom", "pending-asks"), { recursive: true, force: true });
+  let broker = spawn(process.execPath, [...tsxImportArgs, path.join(repoDir, "broker", "broker.ts")], {
     cwd: repoDir,
     env: { ...process.env, HOME: sharedHomeDir, USERPROFILE: sharedHomeDir },
     stdio: ["ignore", "pipe", "pipe"],
@@ -446,6 +450,16 @@ async function setupClients() {
     return {
       planner,
       orchestrator,
+      restartBroker: async () => {
+        broker.kill("SIGTERM");
+        await once(broker, "exit").catch(() => undefined);
+        broker = spawn(process.execPath, [...tsxImportArgs, path.join(repoDir, "broker", "broker.ts")], {
+          cwd: repoDir,
+          env: { ...process.env, HOME: sharedHomeDir, USERPROFILE: sharedHomeDir },
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        await waitForBrokerReady(broker);
+      },
       cleanup: async () => {
         await planner.disconnect().catch(() => undefined);
         await orchestrator.disconnect().catch(() => undefined);
@@ -3246,6 +3260,75 @@ test("broker writes a local pending ask record for delivered blocking asks", { c
       assert.equal(statSync(pendingAskRecordPath(askId)).mode & 0o777, 0o600);
     }
   } finally {
+    await cleanup();
+  }
+});
+
+test("broker rehydrates pending ask routing after restart and preserves exact replyTo", { concurrency: false }, async () => {
+  const { planner, orchestrator, restartBroker, cleanup } = await setupClients();
+  const askId = "pending-record-restart-ask";
+  const plannerId = planner.sessionId!;
+  const orchestratorId = orchestrator.sessionId!;
+  let replacementPlanner: IntercomClient | undefined;
+  let replacementOrchestrator: IntercomClient | undefined;
+
+  try {
+    assert.equal((await planner.send(orchestratorId, { messageId: askId, text: "Still there?", expectsReply: true })).delivered, true);
+    await planner.disconnect();
+    await orchestrator.disconnect();
+    await restartBroker();
+    replacementPlanner = new IntercomClient();
+    replacementOrchestrator = new IntercomClient();
+    const reply = waitForReply(replacementPlanner, askId);
+    await replacementPlanner.connect({ name: "planner", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, plannerId);
+    await replacementOrchestrator.connect({ name: "orchestrator", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, orchestratorId);
+    assert.equal((await replacementOrchestrator.send(plannerId, { text: "Yes, recovered.", replyTo: askId })).delivered, true);
+    assert.equal((await reply).message.replyTo, askId);
+    await waitForPendingAskRecordRemoved(askId);
+  } finally {
+    await replacementPlanner?.disconnect().catch(() => undefined);
+    await replacementOrchestrator?.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("pending ask visibility includes inbound and outbound durable asks after stable-session reconnect", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const askId = "pending-visibility-restart-ask";
+  const plannerId = planner.sessionId!;
+  const orchestratorId = orchestrator.sessionId!;
+  let replacementPlanner: IntercomClient | undefined;
+
+  try {
+    assert.equal((await planner.send(orchestratorId, { messageId: askId, text: "Visible?", expectsReply: true })).delivered, true);
+    assert.equal((await planner.listPendingAsks()).some((ask) => ask.messageId === askId), true);
+    assert.equal((await orchestrator.listPendingAsks()).some((ask) => ask.messageId === askId), true);
+    await planner.disconnect();
+    replacementPlanner = new IntercomClient();
+    await replacementPlanner.connect({ name: "planner", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, plannerId);
+    assert.equal((await replacementPlanner.listPendingAsks()).find((ask) => ask.messageId === askId)?.asker.sessionId, plannerId);
+  } finally {
+    await replacementPlanner?.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("broker routes a three-session ask reply only to its original asker", { concurrency: false }, async () => {
+  const { planner: a, orchestrator: b, cleanup } = await setupClients();
+  const c = new IntercomClient();
+  try {
+    await c.connect({ name: "c", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() });
+    const askId = "three-session-ask";
+    const askerReply = waitForReply(a, askId);
+    let cReplies = 0;
+    c.on("message", (_from, message) => { if (message.replyTo === askId) cReplies += 1; });
+    assert.equal((await a.send(b.sessionId!, { messageId: askId, text: "A to B", expectsReply: true })).delivered, true);
+    assert.equal((await b.send(a.sessionId!, { text: "B to A", replyTo: askId })).delivered, true);
+    assert.equal((await askerReply).message.replyTo, askId);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(cReplies, 0);
+  } finally {
+    await c.disconnect().catch(() => undefined);
     await cleanup();
   }
 });

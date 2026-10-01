@@ -11,7 +11,7 @@ import { ComposeOverlay, type ComposeResult } from "./ui/compose.ts";
 import { InlineMessageComponent } from "./ui/inline-message.ts";
 import { getAskTimeoutMs, loadConfig, type IntercomConfig } from "./config.ts";
 import { EXTENSION_BUS_FEATURE } from "./types.ts";
-import type { Attachment, BrokerMessage, Message, MessageControl, MessageReceiptStatus, SessionInfo, SessionRegistration } from "./types.ts";
+import type { Attachment, BrokerMessage, Message, MessageControl, MessageReceiptStatus, PendingAsk, SessionInfo, SessionRegistration } from "./types.ts";
 import {
   INTERCOM_EXTENSION_REGISTER_EVENT,
   INTERCOM_EXTENSION_REGISTRY_READY_EVENT,
@@ -2833,7 +2833,20 @@ Usage:
 
         case "pending": {
           const pendingAsks = replyTracker.listPending();
-          if (pendingAsks.length === 0) {
+          let durableAsks: PendingAsk[] = [];
+          try {
+            durableAsks = await connectedClient.listPendingAsks();
+          } catch {
+            // Older brokers do not advertise pending ask visibility. The local
+            // tracker remains the backward-compatible source for inbound asks.
+          }
+          const currentSessionId = connectedClient.sessionId;
+          const seen = new Set(pendingAsks.map(({ message }) => message.id));
+          // The action has always shown unresolved inbound asks. Keep that
+          // output contract while sourcing asks from durable broker state after
+          // a restart.
+          const durableOnly = durableAsks.filter((ask) => ask.target.sessionId === currentSessionId && !seen.has(ask.messageId));
+          if (pendingAsks.length === 0 && durableOnly.length === 0) {
             return {
               content: [{ type: "text", text: "No unresolved inbound asks." }],
               details: {},
@@ -2846,6 +2859,11 @@ Usage:
             const elapsedSeconds = Math.max(0, Math.floor((now - receivedAt) / 1000));
             return `- ${from.name || from.id} · ${message.id} · ${elapsedSeconds}s ago · ${preview}`;
           });
+          for (const ask of durableOnly) {
+            const preview = ask.question.replace(/\s+/g, " ").slice(0, 80);
+            const elapsedSeconds = Math.max(0, Math.floor((now - ask.createdAt) / 1000));
+            lines.push(`- ${ask.asker.name || ask.asker.sessionId} · ${ask.messageId} · ${elapsedSeconds}s ago · ${preview}`);
+          }
           return {
             content: [{ type: "text", text: `**Pending asks:**\n${lines.join("\n")}` }],
             details: {},
