@@ -11,7 +11,7 @@ import { ComposeOverlay, type ComposeResult } from "./ui/compose.ts";
 import { InlineMessageComponent } from "./ui/inline-message.ts";
 import { getAskTimeoutMs, loadConfig, type IntercomConfig } from "./config.ts";
 import { EXTENSION_BUS_FEATURE } from "./types.ts";
-import type { Attachment, BrokerMessage, Message, MessageControl, MessageReceiptStatus, SessionInfo, SessionRegistration } from "./types.ts";
+import type { Attachment, BrokerMessage, Message, MessageControl, MessageReceiptStatus, PendingAsk, SessionInfo, SessionRegistration } from "./types.ts";
 import {
   INTERCOM_EXTENSION_REGISTER_EVENT,
   INTERCOM_EXTENSION_REGISTRY_READY_EVENT,
@@ -29,7 +29,7 @@ import {
   type IntercomOutboxResultV1,
   type IntercomSessionIdentityRequestV1,
 } from "./extension-api.ts";
-import { ReplyTracker } from "./reply-tracker.ts";
+import { ReplyTracker, type IntercomContext } from "./reply-tracker.ts";
 import { homedir } from "node:os";
 import { join as joinPath, resolve as resolvePath } from "node:path";
 import { sameCwd } from "./cwd.ts";
@@ -698,6 +698,51 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   function dismissIncomingAsk(messageId: string): void {
     replyTracker.dismissPendingAsk(messageId);
     dropHeldInboundMessage(messageId, { status: "acknowledged", detail: "answered before injection" });
+  }
+  async function resolveReplyTarget(activeClient: IntercomClient, options: { to?: string; replyTo?: string }): Promise<IntercomContext> {
+    try {
+      return replyTracker.resolveReplyTarget(options);
+    } catch (trackerError) {
+      // A restarted session loses its in-memory tracker. Only an exact
+      // replyTo may recover from durable broker state; never infer a target
+      // from a name, prefix, or the question text.
+      if (!options.replyTo) {
+        throw trackerError;
+      }
+      let durableAsks: PendingAsk[];
+      try {
+        durableAsks = await activeClient.listPendingAsks();
+      } catch {
+        throw trackerError;
+      }
+      const currentId = activeClient.sessionId;
+      const ask = durableAsks.find((candidate) => candidate.messageId === options.replyTo
+        && candidate.target.sessionId === currentId
+        && (!options.to
+          || candidate.asker.sessionId === options.to
+          || candidate.asker.name?.toLowerCase() === options.to.toLowerCase()));
+      if (!ask) {
+        throw trackerError;
+      }
+      return {
+        from: {
+          id: ask.asker.sessionId,
+          ...(ask.asker.name !== null ? { name: ask.asker.name } : {}),
+          cwd: "",
+          model: "unknown",
+          pid: 0,
+          startedAt: ask.createdAt,
+          lastActivity: ask.createdAt,
+        },
+        message: {
+          id: ask.messageId,
+          timestamp: ask.createdAt,
+          expectsReply: true,
+          content: { text: ask.question },
+        },
+        receivedAt: ask.createdAt,
+      };
+    }
   }
   function hasSeenInboundMessage(from: SessionInfo, message: Message, now = Date.now()): boolean {
     for (const [key, seenAt] of seenInboundMessages) {
@@ -2787,7 +2832,7 @@ Usage:
           }
 
           try {
-            const target = replyTracker.resolveReplyTarget({ to, replyTo });
+            const target = await resolveReplyTarget(connectedClient, { to, replyTo });
             if (target.from.id === connectedClient.sessionId) {
               return {
                 content: [{ type: "text", text: "Cannot message the current session" }],
@@ -2833,7 +2878,20 @@ Usage:
 
         case "pending": {
           const pendingAsks = replyTracker.listPending();
-          if (pendingAsks.length === 0) {
+          let durableAsks: PendingAsk[] = [];
+          try {
+            durableAsks = await connectedClient.listPendingAsks();
+          } catch {
+            // Older brokers do not advertise pending ask visibility. The local
+            // tracker remains the backward-compatible source for inbound asks.
+          }
+          const currentSessionId = connectedClient.sessionId;
+          const seen = new Set(pendingAsks.map(({ message }) => message.id));
+          // The action has always shown unresolved inbound asks. Keep that
+          // output contract while sourcing asks from durable broker state after
+          // a restart.
+          const durableOnly = durableAsks.filter((ask) => ask.target.sessionId === currentSessionId && !seen.has(ask.messageId));
+          if (pendingAsks.length === 0 && durableOnly.length === 0) {
             return {
               content: [{ type: "text", text: "No unresolved inbound asks." }],
               details: {},
@@ -2846,6 +2904,11 @@ Usage:
             const elapsedSeconds = Math.max(0, Math.floor((now - receivedAt) / 1000));
             return `- ${from.name || from.id} · ${message.id} · ${elapsedSeconds}s ago · ${preview}`;
           });
+          for (const ask of durableOnly) {
+            const preview = ask.question.replace(/\s+/g, " ").slice(0, 80);
+            const elapsedSeconds = Math.max(0, Math.floor((now - ask.createdAt) / 1000));
+            lines.push(`- ${ask.asker.name || ask.asker.sessionId} · ${ask.messageId} · ${elapsedSeconds}s ago · ${preview}`);
+          }
           return {
             content: [{ type: "text", text: `**Pending asks:**\n${lines.join("\n")}` }],
             details: {},

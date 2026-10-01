@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { EventEmitter, once } from "node:events";
@@ -403,7 +404,7 @@ test("opt-in TCP broker requires endpoint state for health and registration", { 
     assert.deepEqual(registerMessages, [{
       type: "registered",
       sessionId: "authorized-tcp-client",
-      features: ["extension-bus-v1", "exact-send-v1"],
+      features: ["extension-bus-v1", "exact-send-v1", "pending-asks-v1"],
     }]);
   } finally {
     if (broker.exitCode === null && broker.signalCode === null) {
@@ -415,7 +416,11 @@ test("opt-in TCP broker requires endpoint state for health and registration", { 
 });
 
 async function setupClients() {
-  const broker = spawn(process.execPath, [...tsxImportArgs, path.join(repoDir, "broker", "broker.ts")], {
+  // Each fixture owns its runtime state. Durable ask records are deliberately
+  // retained across a broker restart within one test, but must not leak into
+  // the next isolated fixture (which may reuse a stable session id).
+  rmSync(path.join(sharedHomeDir, ".pi", "agent", "intercom", "pending-asks"), { recursive: true, force: true });
+  let broker = spawn(process.execPath, [...tsxImportArgs, path.join(repoDir, "broker", "broker.ts")], {
     cwd: repoDir,
     env: { ...process.env, HOME: sharedHomeDir, USERPROFILE: sharedHomeDir },
     stdio: ["ignore", "pipe", "pipe"],
@@ -446,6 +451,16 @@ async function setupClients() {
     return {
       planner,
       orchestrator,
+      restartBroker: async () => {
+        broker.kill("SIGTERM");
+        await once(broker, "exit").catch(() => undefined);
+        broker = spawn(process.execPath, [...tsxImportArgs, path.join(repoDir, "broker", "broker.ts")], {
+          cwd: repoDir,
+          env: { ...process.env, HOME: sharedHomeDir, USERPROFILE: sharedHomeDir },
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        await waitForBrokerReady(broker);
+      },
       cleanup: async () => {
         await planner.disconnect().catch(() => undefined);
         await orchestrator.disconnect().catch(() => undefined);
@@ -527,6 +542,11 @@ async function waitForReplyMessage(messages: Message[], messageId: string, timeo
 
 function pendingAskRecordPath(messageId: string): string {
   return path.join(sharedHomeDir, ".pi", "agent", "intercom", "pending-asks", `${encodeURIComponent(messageId)}.json`);
+}
+
+function scopedPendingAskRecordPath(scopeId: string, messageId: string): string {
+  const scopeHash = createHash("sha256").update(scopeId).digest("hex");
+  return path.join(sharedHomeDir, ".pi", "agent", "intercom", "pending-asks", `${scopeHash}-${encodeURIComponent(messageId)}.json`);
 }
 
 function readPendingAskRecord(messageId: string): Record<string, unknown> {
@@ -3246,6 +3266,346 @@ test("broker writes a local pending ask record for delivered blocking asks", { c
       assert.equal(statSync(pendingAskRecordPath(askId)).mode & 0o777, 0o600);
     }
   } finally {
+    await cleanup();
+  }
+});
+
+test("broker rehydrates pending ask routing after restart and preserves exact replyTo", { concurrency: false }, async () => {
+  const { planner, orchestrator, restartBroker, cleanup } = await setupClients();
+  const askId = "pending-record-restart-ask";
+  const plannerId = planner.sessionId!;
+  const orchestratorId = orchestrator.sessionId!;
+  let replacementPlanner: IntercomClient | undefined;
+  let replacementOrchestrator: IntercomClient | undefined;
+
+  try {
+    assert.equal((await planner.send(orchestratorId, { messageId: askId, text: "Still there?", expectsReply: true })).delivered, true);
+    await planner.disconnect();
+    await orchestrator.disconnect();
+    await restartBroker();
+    replacementPlanner = new IntercomClient();
+    replacementOrchestrator = new IntercomClient();
+    const reply = waitForReply(replacementPlanner, askId);
+    await replacementPlanner.connect({ name: "planner", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, plannerId);
+    await replacementOrchestrator.connect({ name: "orchestrator", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, orchestratorId);
+    assert.equal((await replacementOrchestrator.send(plannerId, { text: "Yes, recovered.", replyTo: askId })).delivered, true);
+    assert.equal((await reply).message.replyTo, askId);
+    await waitForPendingAskRecordRemoved(askId);
+  } finally {
+    await replacementPlanner?.disconnect().catch(() => undefined);
+    await replacementOrchestrator?.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("broker resolves scoped durable ask identity after restart without hiding pending records", { concurrency: false }, async () => {
+  const { planner, orchestrator, restartBroker, cleanup } = await setupClients();
+  const askId = "ambiguous-durable-reuse";
+  const scopeAPlanner = new IntercomClient();
+  const scopeAOrchestrator = new IntercomClient();
+  const scopeBPlanner = new IntercomClient();
+  const scopeBOrchestrator = new IntercomClient();
+  const replacementScopeAPlanner = new IntercomClient();
+  const replacementScopeAOrchestrator = new IntercomClient();
+  const replacementUnscopedPlanner = new IntercomClient();
+  const replacementUnscopedOrchestrator = new IntercomClient();
+  const scopeAReceived: Message[] = [];
+  const unscopedReceived: Message[] = [];
+  scopeAOrchestrator.on("message", (_from: SessionInfo, message: Message) => scopeAReceived.push(message));
+  replacementScopeAOrchestrator.on("message", (_from: SessionInfo, message: Message) => scopeAReceived.push(message));
+  replacementUnscopedOrchestrator.on("message", (_from: SessionInfo, message: Message) => unscopedReceived.push(message));
+
+  try {
+    await planner.disconnect();
+    await orchestrator.disconnect();
+    await connectClientWithScope(scopeAPlanner, "scope-a", "scope-a-planner", "planner");
+    await connectClientWithScope(scopeAOrchestrator, "scope-a", "scope-a-orchestrator", "orchestrator");
+    await connectClientWithScope(scopeBPlanner, "scope-b", "scope-b-planner", "planner");
+    await connectClientWithScope(scopeBOrchestrator, "scope-b", "scope-b-orchestrator", "orchestrator");
+    assert.equal((await scopeAPlanner.send("scope-a-orchestrator", {
+      messageId: askId,
+      text: "First durable ask.",
+      expectsReply: true,
+    })).delivered, true);
+    const scopeARecordPath = scopedPendingAskRecordPath("scope-a", askId);
+    const hiddenScopeARecordPath = `${scopeARecordPath}.hold`;
+    renameSync(scopeARecordPath, hiddenScopeARecordPath);
+    try {
+      assert.equal((await scopeBPlanner.send("scope-b-orchestrator", {
+        messageId: askId,
+        text: "Second durable ask.",
+        expectsReply: true,
+      })).delivered, true);
+    } finally {
+      renameSync(hiddenScopeARecordPath, scopeARecordPath);
+    }
+    assert.equal(scopeAReceived.filter((message) => message.id === askId).length, 1);
+    await scopeAPlanner.disconnect();
+    await scopeAOrchestrator.disconnect();
+    await scopeBPlanner.disconnect();
+    await scopeBOrchestrator.disconnect();
+    await restartBroker();
+
+    await connectClientWithScope(replacementScopeAPlanner, "scope-a", "scope-a-planner", "planner");
+    await connectClientWithScope(replacementScopeAOrchestrator, "scope-a", "scope-a-orchestrator", "orchestrator");
+    const visible = await replacementScopeAPlanner.listPendingAsks();
+    assert.deepEqual(visible.map((ask) => ask.messageId), [askId]);
+    const replay = await replacementScopeAPlanner.send("scope-a-orchestrator", {
+      messageId: askId,
+      text: "First durable ask.",
+      expectsReply: true,
+    });
+    assert.equal(replay.delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(scopeAReceived.filter((message) => message.id === askId).length, 1);
+
+    await replacementUnscopedPlanner.connect({ name: "planner", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, "unscoped-planner");
+    await replacementUnscopedOrchestrator.connect({ name: "orchestrator", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, "unscoped-orchestrator");
+    const blocked = await replacementUnscopedPlanner.send("unscoped-orchestrator", {
+      messageId: askId,
+      text: "A new ask must not overwrite either durable record.",
+      expectsReply: true,
+    });
+    assert.equal(blocked.delivered, false);
+    assert.ok(blocked.code === "E_MESSAGE_ID_AMBIGUOUS" || blocked.code === "E_MESSAGE_ID_REUSE");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(unscopedReceived.some((message) => message.id === askId), false);
+
+    const legal = await replacementScopeAPlanner.send("scope-a-orchestrator", {
+      messageId: "unambiguous-new-ask-id",
+      text: "A fresh id remains deliverable.",
+      expectsReply: true,
+    });
+    assert.equal(legal.delivered, true);
+  } finally {
+    await Promise.all([
+      scopeAPlanner.disconnect().catch(() => undefined),
+      scopeAOrchestrator.disconnect().catch(() => undefined),
+      scopeBPlanner.disconnect().catch(() => undefined),
+      scopeBOrchestrator.disconnect().catch(() => undefined),
+      replacementScopeAPlanner.disconnect().catch(() => undefined),
+      replacementScopeAOrchestrator.disconnect().catch(() => undefined),
+      replacementUnscopedPlanner.disconnect().catch(() => undefined),
+      replacementUnscopedOrchestrator.disconnect().catch(() => undefined),
+    ]);
+    await cleanup();
+  }
+});
+
+test("broker keeps same-id rehydrated ask edges isolated by scope", { concurrency: false }, async () => {
+  const { planner, orchestrator, restartBroker, cleanup } = await setupClients();
+  const askId = "same-id-rehydrated-ask";
+  const scopeAPlanner = new IntercomClient();
+  const scopeAOrchestrator = new IntercomClient();
+  const scopeBPlanner = new IntercomClient();
+  const scopeBOrchestrator = new IntercomClient();
+  const replacementAPlanner = new IntercomClient();
+  const replacementAOrchestrator = new IntercomClient();
+  const replacementBPlanner = new IntercomClient();
+  const replacementBOrchestrator = new IntercomClient();
+
+  try {
+    await planner.disconnect();
+    await orchestrator.disconnect();
+    await connectClientWithScope(scopeAPlanner, "scope-a", "scope-a-planner", "planner");
+    await connectClientWithScope(scopeAOrchestrator, "scope-a", "scope-a-orchestrator", "orchestrator");
+    await connectClientWithScope(scopeBPlanner, "scope-b", "scope-b-planner", "planner");
+    await connectClientWithScope(scopeBOrchestrator, "scope-b", "scope-b-orchestrator", "orchestrator");
+    assert.equal((await scopeAPlanner.send("scope-a-orchestrator", { messageId: askId, text: "Ask from A", expectsReply: true })).delivered, true);
+    assert.equal((await scopeBPlanner.send("scope-b-orchestrator", { messageId: askId, text: "Ask from B", expectsReply: true })).delivered, true);
+
+    await Promise.all([
+      scopeAPlanner.disconnect(),
+      scopeAOrchestrator.disconnect(),
+      scopeBPlanner.disconnect(),
+      scopeBOrchestrator.disconnect(),
+    ]);
+    await restartBroker();
+    await connectClientWithScope(replacementAPlanner, "scope-a", "scope-a-planner", "planner");
+    await connectClientWithScope(replacementAOrchestrator, "scope-a", "scope-a-orchestrator", "orchestrator");
+    await connectClientWithScope(replacementBPlanner, "scope-b", "scope-b-planner", "planner");
+    await connectClientWithScope(replacementBOrchestrator, "scope-b", "scope-b-orchestrator", "orchestrator");
+
+    const replyA = waitForReply(replacementAPlanner, askId);
+    const replyB = waitForReply(replacementBPlanner, askId);
+    assert.equal((await replacementAOrchestrator.send("scope-a-planner", { messageId: "same-id-reply-a", text: "Reply from A", replyTo: askId })).delivered, true);
+    assert.equal((await replacementBOrchestrator.send("scope-b-planner", { messageId: "same-id-reply-b", text: "Reply from B", replyTo: askId })).delivered, true);
+    assert.equal((await replyA).message.content.text, "Reply from A");
+    assert.equal((await replyB).message.content.text, "Reply from B");
+  } finally {
+    await Promise.all([
+      scopeAPlanner.disconnect().catch(() => undefined),
+      scopeAOrchestrator.disconnect().catch(() => undefined),
+      scopeBPlanner.disconnect().catch(() => undefined),
+      scopeBOrchestrator.disconnect().catch(() => undefined),
+      replacementAPlanner.disconnect().catch(() => undefined),
+      replacementAOrchestrator.disconnect().catch(() => undefined),
+      replacementBPlanner.disconnect().catch(() => undefined),
+      replacementBOrchestrator.disconnect().catch(() => undefined),
+    ]);
+    await cleanup();
+  }
+});
+
+test("broker isolates same-id receipt and cancellation routes by sender scope", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const scopeAPlanner = new IntercomClient();
+  const scopeAOrchestrator = new IntercomClient();
+  const scopeBPlanner = new IntercomClient();
+  const scopeBOrchestrator = new IntercomClient();
+  const messageId = "same-id-ordinary-message";
+  const receiptsA: string[] = [];
+  const receiptsB: string[] = [];
+  const controlsA: string[] = [];
+  const controlsB: string[] = [];
+  const unsubscribeReceiptA = scopeAPlanner.onMessageReceipt((_from, receipt) => receiptsA.push(receipt.status));
+  const unsubscribeReceiptB = scopeBPlanner.onMessageReceipt((_from, receipt) => receiptsB.push(receipt.status));
+  const unsubscribeControlA = scopeAOrchestrator.onMessageControl((_from, control) => controlsA.push(control.action));
+  const unsubscribeControlB = scopeBOrchestrator.onMessageControl((_from, control) => controlsB.push(control.action));
+
+  try {
+    await planner.disconnect();
+    await orchestrator.disconnect();
+    await connectClientWithScope(scopeAPlanner, "scope-a", "scope-a-planner", "planner");
+    await connectClientWithScope(scopeAOrchestrator, "scope-a", "scope-a-orchestrator", "orchestrator");
+    await connectClientWithScope(scopeBPlanner, "scope-b", "scope-b-planner", "planner");
+    await connectClientWithScope(scopeBOrchestrator, "scope-b", "scope-b-orchestrator", "orchestrator");
+
+    assert.equal((await scopeAPlanner.send("scope-a-orchestrator", { messageId, text: "Message A" })).delivered, true);
+    assert.equal((await scopeBPlanner.send("scope-b-orchestrator", { messageId, text: "Message B" })).delivered, true);
+    scopeAOrchestrator.sendMessageReceipt({ messageId, status: "receiver_received", timestamp: Date.now() });
+    scopeBOrchestrator.sendMessageReceipt({ messageId, status: "receiver_received", timestamp: Date.now() });
+    await waitForCondition(() => receiptsA.includes("receiver_received") && receiptsB.includes("receiver_received"), "same-id scoped receipts");
+
+    assert.equal((await scopeAPlanner.cancelMessage(messageId)).delivered, true);
+    assert.equal((await scopeBPlanner.cancelMessage(messageId)).delivered, true);
+    await waitForCondition(() => controlsA.includes("cancel") && controlsB.includes("cancel"), "same-id scoped cancellations");
+  } finally {
+    unsubscribeReceiptA();
+    unsubscribeReceiptB();
+    unsubscribeControlA();
+    unsubscribeControlB();
+    await Promise.all([
+      scopeAPlanner.disconnect().catch(() => undefined),
+      scopeAOrchestrator.disconnect().catch(() => undefined),
+      scopeBPlanner.disconnect().catch(() => undefined),
+      scopeBOrchestrator.disconnect().catch(() => undefined),
+    ]);
+    await cleanup();
+  }
+});
+
+test("broker preserves legacy unscoped pending records and removes scope-mismatched filenames", { concurrency: false }, async () => {
+  const { planner, orchestrator, restartBroker, cleanup } = await setupClients();
+  const askId = "legacy-scope-filename-check";
+  const filePath = pendingAskRecordPath(askId);
+  const legacyAskId = "legacy-unscoped-record";
+  const legacyPath = pendingAskRecordPath(legacyAskId);
+  try {
+    const createdAt = Date.now();
+    writeFileSync(filePath, `${JSON.stringify({
+      askId,
+      messageId: askId,
+      asker: { sessionId: planner.sessionId, name: "planner" },
+      target: { sessionId: orchestrator.sessionId, name: "orchestrator" },
+      scopeId: "scope-a",
+      question: "Must not be reused from an unscoped filename.",
+      createdAt,
+      expiresAt: createdAt + 60_000,
+    })}\n`);
+    writeFileSync(legacyPath, `${JSON.stringify({
+      askId: legacyAskId,
+      messageId: legacyAskId,
+      asker: { sessionId: planner.sessionId, name: "planner" },
+      target: { sessionId: orchestrator.sessionId, name: "orchestrator" },
+      question: "Legacy unscoped records remain compatible.",
+      createdAt,
+      expiresAt: createdAt + 60_000,
+    })}\n`);
+    await planner.disconnect();
+    await orchestrator.disconnect();
+    await restartBroker();
+    assert.equal(existsSync(filePath), false);
+    assert.equal(existsSync(legacyPath), true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("intercom reply uses an exact durable ask after the receiver session restarts", { concurrency: false }, async () => {
+  const { planner, orchestrator, restartBroker, cleanup } = await setupClients();
+  const askId = "durable-reply-action-ask";
+  const plannerId = planner.sessionId!;
+  const orchestratorId = orchestrator.sessionId!;
+  let replacementPlanner: IntercomClient | undefined;
+  let harness: ReturnType<typeof createExtensionHarness> | undefined;
+
+  try {
+    assert.equal((await planner.send(orchestratorId, { messageId: askId, text: "Reply after restart?", expectsReply: true })).delivered, true);
+    await planner.disconnect();
+    await orchestrator.disconnect();
+    await restartBroker();
+
+    replacementPlanner = new IntercomClient();
+    await replacementPlanner.connect({ name: "planner", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, plannerId);
+    const { default: piIntercomExtension } = await import("./index.ts");
+    harness = createExtensionHarness("orchestrator", { sessionId: orchestratorId });
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const reply = waitForReply(replacementPlanner, askId);
+    const result = await intercomTool.execute("durable-reply-action", {
+      action: "reply",
+      replyTo: askId,
+      message: "Recovered answer.",
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(result.details?.delivered, true);
+    assert.match(result.content[0]?.text ?? "", /Reply sent/);
+    assert.equal((await reply).message.replyTo, askId);
+  } finally {
+    if (harness) await harness.emitLifecycle("session_shutdown").catch(() => undefined);
+    await replacementPlanner?.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("pending ask visibility includes inbound and outbound durable asks after stable-session reconnect", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const askId = "pending-visibility-restart-ask";
+  const plannerId = planner.sessionId!;
+  const orchestratorId = orchestrator.sessionId!;
+  let replacementPlanner: IntercomClient | undefined;
+
+  try {
+    assert.equal((await planner.send(orchestratorId, { messageId: askId, text: "Visible?", expectsReply: true })).delivered, true);
+    assert.equal((await planner.listPendingAsks()).some((ask) => ask.messageId === askId), true);
+    assert.equal((await orchestrator.listPendingAsks()).some((ask) => ask.messageId === askId), true);
+    await planner.disconnect();
+    replacementPlanner = new IntercomClient();
+    await replacementPlanner.connect({ name: "planner", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, plannerId);
+    assert.equal((await replacementPlanner.listPendingAsks()).find((ask) => ask.messageId === askId)?.asker.sessionId, plannerId);
+  } finally {
+    await replacementPlanner?.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("broker routes a three-session ask reply only to its original asker", { concurrency: false }, async () => {
+  const { planner: a, orchestrator: b, cleanup } = await setupClients();
+  const c = new IntercomClient();
+  try {
+    await c.connect({ name: "c", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() });
+    const askId = "three-session-ask";
+    const askerReply = waitForReply(a, askId);
+    let cReplies = 0;
+    c.on("message", (_from, message) => { if (message.replyTo === askId) cReplies += 1; });
+    assert.equal((await a.send(b.sessionId!, { messageId: askId, text: "A to B", expectsReply: true })).delivered, true);
+    assert.equal((await b.send(a.sessionId!, { text: "B to A", replyTo: askId })).delivered, true);
+    assert.equal((await askerReply).message.replyTo, askId);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(cReplies, 0);
+  } finally {
+    await c.disconnect().catch(() => undefined);
     await cleanup();
   }
 });
