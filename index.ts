@@ -2796,31 +2796,34 @@ Usage:
                 details: { error: true },
               };
             }
+            const pendingReplyTo = target.message.expectsReply ? target.message.id : undefined;
             const result = await connectedClient.send(target.from.id, {
               text: message,
               attachments,
-              replyTo: target.message.id,
+              ...(pendingReplyTo ? { replyTo: pendingReplyTo } : {}),
             });
             if (!result.delivered) {
               const errorText = result.reason ?? "Session may not exist or has disconnected.";
-              if (result.reason === "Session not found") {
-                dismissIncomingAsk(target.message.id);
+              if (pendingReplyTo && result.reason === "Session not found") {
+                dismissIncomingAsk(pendingReplyTo);
               }
               return {
-                content: [{ type: "text", text: `Reply to "${target.from.name || target.from.id}" was not delivered: ${errorText}` }],
+                content: [{ type: "text", text: `${pendingReplyTo ? "Reply" : "Response"} to "${target.from.name || target.from.id}" was not delivered: ${errorText}` }],
                 details: deliveryDetails(result),
               };
             }
-            dismissIncomingAsk(target.message.id);
+            if (pendingReplyTo) {
+              dismissIncomingAsk(pendingReplyTo);
+            }
             pi.appendEntry("intercom_sent", {
               to: target.from.name || target.from.id,
-              message: { text: message, attachments, replyTo: target.message.id },
+              message: { text: message, attachments, ...(pendingReplyTo ? { replyTo: pendingReplyTo } : {}) },
               messageId: result.id,
               timestamp: Date.now(),
             });
             return {
-              content: [{ type: "text", text: `Reply sent to ${target.from.name || target.from.id}` }],
-              details: { ...deliveryDetails(result), replyTo: target.message.id },
+              content: [{ type: "text", text: pendingReplyTo ? `Reply sent to ${target.from.name || target.from.id}` : `Response sent to ${target.from.name || target.from.id}` }],
+              details: { ...deliveryDetails(result), ...(pendingReplyTo ? { replyTo: pendingReplyTo } : {}) },
             };
           } catch (error) {
             return {

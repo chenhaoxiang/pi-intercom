@@ -3553,6 +3553,46 @@ test("intercom reply targets exact replyTo when multiple asks are pending", { co
   }
 });
 
+test("intercom reply responds safely to an ordinary inbound message", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("ordinary-response-worker");
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const worker = await waitForSessionByName(planner, "ordinary-response-worker");
+    assert.equal((await planner.send(worker.id, {
+      messageId: "ordinary-inbound-message",
+      text: "Status update.",
+    })).delivered, true);
+
+    const deadline = Date.now() + 1000;
+    while (harness.sentMessages.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    await harness.emitLifecycle("turn_start");
+
+    const responseReceived = once(planner, "message") as Promise<[SessionInfo, Message]>;
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const result = await intercomTool.execute("ordinary-response", {
+      action: "reply",
+      message: "Acknowledged.",
+    }, new AbortController().signal, undefined, harness.ctx);
+
+    assert.equal(result.details?.error, undefined);
+    assert.equal(result.details?.replyTo, undefined);
+    assert.match(result.content[0]?.text ?? "", /Response sent to planner/);
+    const [from, response] = await responseReceived;
+    assert.equal(from.id, worker.id);
+    assert.equal(response.content.text, "Acknowledged.");
+    assert.equal(response.replyTo, undefined);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("intercom reply sends attachments", { concurrency: false }, async () => {
   const { planner, cleanup } = await setupClients();
   const { default: piIntercomExtension } = await import("./index.ts");

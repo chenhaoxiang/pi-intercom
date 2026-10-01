@@ -94,7 +94,17 @@ export class ReplyTracker {
 
     const pending = Array.from(this.pendingAsks.values());
     if (options.to) {
-      return resolvePendingSender(pending, options.to);
+      try {
+        return resolvePendingSender(pending, options.to);
+      } catch (error) {
+        // Ordinary inbound messages are turn contexts but not pending asks.
+        // Permit an explicit response only when it addresses that exact
+        // context; never fall back to an arbitrary destination.
+        if (this.currentTurnContext && matchesPendingSender(this.currentTurnContext, options.to)) {
+          return this.currentTurnContext;
+        }
+        throw error;
+      }
     }
 
     if (this.currentTurnContext) {

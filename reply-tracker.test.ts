@@ -45,6 +45,17 @@ test("reply resolves from single pending ask without current turn context", () =
   assert.equal(tracker.resolveReplyTarget({}, 1001).message.id, "ask-1");
 });
 
+test("reply resolves an ordinary current-turn message only with its explicit sender", () => {
+  const tracker = new ReplyTracker();
+  const context = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("message-1", "Status update", false), 1000);
+  tracker.queueTurnContext(context);
+  tracker.beginTurn(1001);
+
+  assert.equal(tracker.resolveReplyTarget({}, 1002).message.id, "message-1");
+  assert.equal(tracker.resolveReplyTarget({ to: "planner" }, 1002).message.id, "message-1");
+  assert.throws(() => tracker.resolveReplyTarget({ to: "reviewer" }, 1002), /No pending ask from "reviewer"/);
+});
+
 test("reply with to resolves matching pending ask", () => {
   const tracker = new ReplyTracker();
   tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "First"), 1000);
