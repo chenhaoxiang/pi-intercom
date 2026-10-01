@@ -3,9 +3,9 @@ import net from "net";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
 import { getBrokerConnectTarget, type BrokerConnectTarget } from "./paths.ts";
-import { isMessage, isMessageControl, isMessageReceipt, isSessionInfo } from "./protocol.ts";
+import { isMessage, isMessageControl, isMessageReceipt, isPendingAsk, isSessionInfo } from "./protocol.ts";
 import { getIntercomScopeId } from "../config.ts";
-import { EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, type DeliveryDetails } from "../types.ts";
+import { EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, PENDING_ASKS_FEATURE, type DeliveryDetails } from "../types.ts";
 import type {
   Attachment,
   BrokerMessage,
@@ -15,6 +15,7 @@ import type {
   MessageControl,
   MessageProvenance,
   MessageReceipt,
+  PendingAsk,
   SessionInfo,
   SessionRegistration,
 } from "../types.ts";
@@ -71,6 +72,7 @@ export class IntercomClient extends EventEmitter {
   private _features = new Set<string>();
   private pendingSends = new Map<string, { resolve: (r: SendResult) => void; reject: (e: Error) => void }>();
   private pendingLists = new Map<string, { resolve: (sessions: SessionInfo[]) => void; reject: (e: Error) => void }>();
+  private pendingAskLists = new Map<string, { resolve: (asks: PendingAsk[]) => void; reject: (e: Error) => void }>();
   private nextSenderSequence = 1;
   private disconnecting = false;
   private disconnectError: Error | null = null;
@@ -86,6 +88,10 @@ export class IntercomClient extends EventEmitter {
       pending.reject(error);
     }
     this.pendingLists.clear();
+    for (const pending of this.pendingAskLists.values()) {
+      pending.reject(error);
+    }
+    this.pendingAskLists.clear();
   }
 
   get sessionId(): string | null {
@@ -342,6 +348,18 @@ export class IntercomClient extends EventEmitter {
         };
         this.emit("broker_message", registered);
         this.emit("_registered", registered);
+        break;
+      }
+
+      case "pending_asks": {
+        const { requestId, version, asks } = brokerMessage;
+        if (typeof requestId !== "string" || version !== 1 || !Array.isArray(asks) || !asks.every(isPendingAsk)) {
+          throw new Error("Invalid pending asks message");
+        }
+        const pending = this.pendingAskLists.get(requestId);
+        if (!pending) return;
+        this.pendingAskLists.delete(requestId);
+        pending.resolve(asks as PendingAsk[]);
         break;
       }
 
@@ -615,6 +633,37 @@ export class IntercomClient extends EventEmitter {
       } catch (error) {
         clearTimeout(timeout);
         this.pendingLists.delete(requestId);
+        reject(toError(error));
+      }
+    });
+  }
+
+  listPendingAsks(options: { timeoutMs?: number } = {}): Promise<PendingAsk[]> {
+    if (!this.supportsFeature(PENDING_ASKS_FEATURE)) {
+      return Promise.resolve([]);
+    }
+    let socket: net.Socket;
+    try {
+      socket = this.requireActiveSocket();
+    } catch (error) {
+      return Promise.reject(toError(error));
+    }
+    return new Promise((resolve, reject) => {
+      const requestId = randomUUID();
+      const wrappedResolve = (asks: PendingAsk[]) => { clearTimeout(timeout); resolve(asks); };
+      const wrappedReject = (error: Error) => { clearTimeout(timeout); reject(error); };
+      const timeout = setTimeout(() => {
+        if (this.pendingAskLists.has(requestId)) {
+          this.pendingAskLists.delete(requestId);
+          wrappedReject(new Error("List pending asks timeout"));
+        }
+      }, options.timeoutMs ?? 5000);
+      this.pendingAskLists.set(requestId, { resolve: wrappedResolve, reject: wrappedReject });
+      try {
+        writeMessage(socket, { type: "pending_asks", requestId, version: 1 });
+      } catch (error) {
+        clearTimeout(timeout);
+        this.pendingAskLists.delete(requestId);
         reject(toError(error));
       }
     });
