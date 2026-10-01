@@ -3639,7 +3639,7 @@ test("intercom reply responds safely to an ordinary inbound message", { concurre
   }
 });
 
-test("failed ordinary-message reply does not clear an unrelated pending ask", { concurrency: false }, async () => {
+test("failed ordinary-message reply resolution does not clear an unrelated pending ask", { concurrency: false }, async () => {
   const { planner, orchestrator, cleanup } = await setupClients();
   const { default: piIntercomExtension } = await import("./index.ts");
   const harness = createExtensionHarness("ordinary-failure-worker");
@@ -3677,6 +3677,62 @@ test("failed ordinary-message reply does not clear an unrelated pending ask", { 
     }, new AbortController().signal, undefined, harness.ctx);
     assert.match(pending.content[0]?.text ?? "", /unrelated-pending-ask/);
   } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("failed ordinary-message delivery preserves an unrelated pending ask", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("ordinary-delivery-failure-worker");
+  const originalSend = IntercomClient.prototype.send;
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const worker = await waitForSessionByName(planner, "ordinary-delivery-failure-worker");
+    assert.equal((await orchestrator.send(worker.id, {
+      messageId: "ordinary-delivery-message",
+      text: "A regular update.",
+    })).delivered, true);
+    assert.equal((await planner.send(worker.id, {
+      messageId: "ordinary-delivery-unrelated-ask",
+      text: "Please decide.",
+      expectsReply: true,
+    })).delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await harness.emitLifecycle("turn_start");
+
+    // Exercise a real broker delivery failure without expiring or replacing
+    // endpoints: reuse the response ID with changed authored content.
+    IntercomClient.prototype.send = function (to, options) {
+      return originalSend.call(this, to, this.sessionId === worker.id
+        ? { ...options, messageId: "ordinary-delivery-response" }
+        : options);
+    };
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const first = await intercomTool.execute("ordinary-delivery-first", {
+      action: "reply",
+      message: "First response.",
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(first.details?.delivered, true);
+    assert.equal(first.details?.replyTo, undefined);
+
+    const failed = await intercomTool.execute("ordinary-delivery-failed", {
+      action: "reply",
+      message: "Changed response.",
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(failed.details?.delivered, false);
+    assert.equal(failed.details?.code, "E_MESSAGE_ID_REUSE");
+    assert.match(failed.content[0]?.text ?? "", /Response to "orchestrator" was not delivered/);
+
+    const pending = await intercomTool.execute("ordinary-delivery-pending", {
+      action: "pending",
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.match(pending.content[0]?.text ?? "", /ordinary-delivery-unrelated-ask/);
+  } finally {
+    IntercomClient.prototype.send = originalSend;
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
   }
