@@ -15,6 +15,13 @@ function matchesPendingSender(context: IntercomContext, to: string): boolean {
   return context.from.name?.toLowerCase() === to.toLowerCase();
 }
 
+function hasPendingSenderMatch(pending: IntercomContext[], to: string): boolean {
+  const lowerTo = to.toLowerCase();
+  return pending.some((context) => context.from.id === to
+    || context.from.name?.toLowerCase() === lowerTo
+    || context.from.id.startsWith(to));
+}
+
 function resolvePendingSender(pending: IntercomContext[], to: string): IntercomContext {
   const exactIdMatches = pending.filter((context) => context.from.id === to);
   if (exactIdMatches.length === 1) {
@@ -79,6 +86,7 @@ export class ReplyTracker {
   }
 
   resolveReplyTarget(options: { to?: string; replyTo?: string }, now = Date.now()): IntercomContext {
+    const currentContext = this.currentTurnContext;
     this.pruneExpired(now);
 
     if (options.replyTo) {
@@ -94,21 +102,38 @@ export class ReplyTracker {
 
     const pending = Array.from(this.pendingAsks.values());
     if (options.to) {
-      return resolvePendingSender(pending, options.to);
+      try {
+        return resolvePendingSender(pending, options.to);
+      } catch (error) {
+        // Ordinary inbound messages are turn contexts but not pending asks.
+        // Permit an explicit response only when it addresses that exact
+        // context; never fall back to an arbitrary destination.
+        if (!hasPendingSenderMatch(pending, options.to)
+          && this.currentTurnContext
+          && !this.currentTurnContext.message.expectsReply
+          && matchesPendingSender(this.currentTurnContext, options.to)) {
+          return this.currentTurnContext;
+        }
+        throw error;
+      }
+    }
+
+    if (pending.length > 1) {
+      throw new Error("Multiple pending asks — specify `replyTo` or `to`");
+    }
+    if (pending.length === 1) {
+      return pending[0]!;
+    }
+
+    if (currentContext?.message.expectsReply) {
+      throw new Error(`Current ask "${currentContext.message.id}" is expired or no longer pending — specify a pending \`replyTo\``);
     }
 
     if (this.currentTurnContext) {
       return this.currentTurnContext;
     }
 
-    if (pending.length === 1) {
-      return pending[0]!;
-    }
-    if (pending.length === 0) {
-      throw new Error("No active intercom context to reply to");
-    }
-
-    throw new Error("Multiple pending asks — specify `to`");
+    throw new Error("No active intercom context to reply to");
   }
 
   findUniquePendingAskFrom(to: string, now = Date.now()): IntercomContext | null {

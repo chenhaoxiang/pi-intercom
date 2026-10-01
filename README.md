@@ -137,13 +137,13 @@ When a message arrives, it appears inline in your chat with the sender's info an
 ```
 **From research** (~/projects/api)
 
-To reply, use the intercom tool: intercom({ action: "reply", message: "..." })
+To reply, use the intercom tool: intercom({ action: "reply", replyTo: "message-123", message: "..." })
 
 Found the issue — UserService.validate() doesn't check for null input.
 See auth.ts:142-156.
 ```
 
-The reply hint (enabled by default) points to `intercom({ action: "reply", ... })`, so recipients do not need raw sender or `replyTo` IDs. Idle recipients get a new turn immediately; by default busy interactive recipients enter Pi's steering queue at the next safe model boundary without aborting the run. With `busyDelivery: "human-first"`, busy interactive peers wait outside Pi's queues: one FIFO peer is steered per turn when no human message is pending. If the run ends first, the idle flush releases one via the normal `inboundTrigger` policy; remaining peers wait for later turns. Sustained human input can delay peers. Busy non-UI sessions retain their auto-reply behavior. Attachment content is included in the agent-visible body, and messages are rendered inline and stored in Pi session history.
+The reply hint (enabled by default) includes the exact inbound message ID: use the shown `replyTo` value rather than guessing a sender or replying to another pending ask. Idle recipients get a new turn immediately; by default busy interactive recipients enter Pi's steering queue at the next safe model boundary without aborting the run. With `busyDelivery: "human-first"`, busy interactive peers wait outside Pi's queues: one FIFO peer is steered per turn when no human message is pending. If the run ends first, the idle flush releases one via the normal `inboundTrigger` policy; remaining peers wait for later turns. Sustained human input can delay peers. Busy non-UI sessions retain their auto-reply behavior. Attachment content is included in the agent-visible body, and messages are rendered inline and stored in Pi session history.
 
 ## Workflow: Planner-Worker Coordination
 
@@ -225,7 +225,7 @@ When `replyHint` is enabled (the default), incoming messages include the exact `
 ```
 **From planner** (~/projects/api)
 
-To reply, use the intercom tool: intercom({ action: "reply", message: "..." })
+To reply, use the intercom tool: intercom({ action: "reply", replyTo: "ask-123", message: "..." })
 
 Only GET/PUT/DELETE — never POST. Max 3 retries with exponential backoff starting at 100ms.
 ```
@@ -238,7 +238,7 @@ This matters because the agent receiving the message doesn't need to reconstruct
 
 `ask` requires a currently connected recipient, then blocks until it responds (10-minute timeout by default; set `PI_INTERCOM_ASK_TIMEOUT_MS` to a positive millisecond value to change it). If the target is disconnected, `ask` fails immediately; use `send` when queued, non-blocking mailbox delivery is appropriate. The reply comes back as the tool result, so the agent continues in the same turn with full context. No confirmation dialog — if you're asking and waiting, the intent is clear.
 
-`reply` is receiver-side sugar for replying to an inbound ask. In the turn triggered by an incoming intercom ask, `intercom({ action: "reply", message: "..." })` targets that exact sender and message automatically. If you reply later, it falls back to the single unresolved inbound ask. If multiple asks are pending, use `intercom({ action: "pending" })` to inspect them and then call `reply` with `to` to disambiguate.
+`reply` is receiver-side sugar for replying to an inbound message. Use the exact `replyTo` from the displayed hint for asks; this is deterministic even when several asks arrive in one turn. If you reply later without `replyTo`, it falls back only to a single unresolved inbound ask. When multiple asks are pending, an ask-turn reply without `replyTo` fails closed; inspect `pending` and provide the exact `replyTo` (or an unambiguous `to`). Ordinary inbound messages remain non-threaded responses when no `replyTo` is supplied.
 
 The broker keeps a bounded in-memory mailbox for recently disconnected explicitly named sessions. If a lightweight CLI sender asks a long-running session something and exits before the answer, the later `reply` is accepted into that mailbox instead of failing with `Session not found`; a process that reconnects with the same explicit name and directory receives the queued reply. Runtime-only unnamed-session aliases never transfer mailbox ownership, and routing never remaps mail back to its sender. This is per-broker runtime state, not durable storage across broker restarts.
 
@@ -356,7 +356,7 @@ Child index: 0
 Which API should I use?
 ```
 
-Reply hints work the same as regular `intercom` ask/reply flows. The supervisor can reply with `intercom({ action: "reply", message: "..." })` and the subagent receives the answer as the tool result.
+Reply hints work the same as regular `intercom` ask/reply flows. The supervisor should copy the exact `replyTo` from the displayed command into `intercom({ action: "reply", replyTo: "ask-id", message: "..." })`; the asking subagent receives the answer as the tool result.
 
 For `interview_request`, the supervisor message includes the structured questions plus a fenced JSON answer example using this stable shape:
 
@@ -415,7 +415,7 @@ Only registered in sessions where `pi-subagents` supplied the required child bri
 
 **`handover`** — Summarizes the current session with the current model and sends the summary to the target, which acts on it. `message` is the optional next task. Targeting, confirmation, and delivery work exactly like `send`, including `name@machine` targets. `replyTo`, `supersedes`, `retryOf`, and `attachments` are rejected. See [Workflow: Handing Over a Session](#workflow-handing-over-a-session).
 
-**`reply`** — Replies to the current intercom-triggered message if there is one. Otherwise it falls back to the single unresolved inbound ask. If multiple asks are pending, pass `to` or inspect them with `pending` first. Under the hood this is still a normal `send` with the exact `replyTo` value.
+**`reply`** — Replies using the exact `replyTo` supplied by the inbound ask hint. Without `replyTo`, an ordinary current-turn message can receive a non-threaded response; a single unresolved ask remains a backward-compatible fallback. Multiple pending asks fail closed unless `replyTo` or an unambiguous `to` is supplied. Under the hood ask replies are normal sends with the exact `replyTo` value.
 
 **`pending`** — Lists unresolved inbound asks with sender, message ID, elapsed time, and a short preview. Useful when replying after the original triggered turn.
 
@@ -649,7 +649,7 @@ Supported `config.json` keys include `stableId` for restart-stable addressing, `
 
 **Auto-spawn with file lock.** The broker starts on first connection and exits after 5 seconds idle. There is no daemon to manage. A spawn lock file, keyed by PID and timestamp, prevents duplicate brokers when multiple sessions start at once.
 
-**`ask` stays client-side.** The broker still routes plain messages; it does not have a special request/response mode for `ask`. The client waits for a matching reply before it triggers a new turn, then returns that reply as the tool result. Reply hints make that flow practical by showing the recipient the exact `send` call to use. Separately, `list` / `sessions` now carry a `requestId` so a delayed session-list reply cannot be mistaken for a newer one.
+**`ask` stays client-side.** The broker still routes plain messages; it does not have a special request/response mode for `ask`. The client waits for a matching reply before it triggers a new turn, then returns that reply as the tool result. Reply hints make that flow practical by showing the recipient the exact `reply` call and `replyTo` ID to use. Separately, `list` / `sessions` now carry a `requestId` so a delayed session-list reply cannot be mistaken for a newer one.
 
 ## pi-intercom vs pi-messenger
 

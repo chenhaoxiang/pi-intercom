@@ -45,6 +45,75 @@ test("reply resolves from single pending ask without current turn context", () =
   assert.equal(tracker.resolveReplyTarget({}, 1001).message.id, "ask-1");
 });
 
+test("reply resolves an ordinary current-turn message only with its explicit sender", () => {
+  const tracker = new ReplyTracker();
+  const context = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("message-1", "Status update", false), 1000);
+  tracker.queueTurnContext(context);
+  tracker.beginTurn(1001);
+
+  assert.equal(tracker.resolveReplyTarget({}, 1002).message.id, "message-1");
+  assert.equal(tracker.resolveReplyTarget({ to: "planner" }, 1002).message.id, "message-1");
+  assert.throws(() => tracker.resolveReplyTarget({ to: "reviewer" }, 1002), /No pending ask from "reviewer"/);
+});
+
+test("single pending ask wins over an ordinary current-turn context", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("reviewer-id", "reviewer"), createMessage("ask-1", "Need a decision"), 1000);
+  const ordinary = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("message-1", "Status update", false), 1001);
+  tracker.queueTurnContext(ordinary);
+  tracker.beginTurn(1002);
+
+  assert.equal(tracker.resolveReplyTarget({}, 1003).message.id, "ask-1");
+  tracker.markReplied("ask-1");
+  assert.deepEqual(tracker.listPending(1003), []);
+});
+
+test("explicit ordinary-message replyTo is rejected without falling back", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("reviewer-id", "reviewer"), createMessage("ask-1", "Need a decision"), 1000);
+  const ordinary = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("message-1", "Status update", false), 1001);
+  tracker.queueTurnContext(ordinary);
+  tracker.beginTurn(1002);
+
+  assert.throws(() => tracker.resolveReplyTarget({ replyTo: "message-1" }, 1003), /No pending ask with message ID "message-1"/);
+  assert.deepEqual(tracker.listPending(1003).map((context) => context.message.id), ["ask-1"]);
+});
+
+test("failed ordinary-message reply resolution preserves unrelated pending asks", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("reviewer-id", "reviewer"), createMessage("ask-1", "Need a decision"), 1000);
+  const ordinary = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("message-1", "Status update", false), 1001);
+  tracker.queueTurnContext(ordinary);
+  tracker.beginTurn(1002);
+
+  assert.throws(() => tracker.resolveReplyTarget({ to: "missing" }, 1003), /No pending ask from "missing"/);
+  assert.deepEqual(tracker.listPending(1003).map((context) => context.message.id), ["ask-1"]);
+});
+
+test("ordinary current context does not override same-name pending ask ambiguity", () => {
+  const tracker = new ReplyTracker();
+  const ordinary = tracker.recordIncomingMessage(createSession("ordinary-id", "ordinary"), createMessage("message-1", "Status update", false), 1000);
+  tracker.recordIncomingMessage(createSession("pending-one", "shared"), createMessage("ask-1", "First"), 1001);
+  tracker.recordIncomingMessage(createSession("pending-two", "shared"), createMessage("ask-2", "Second"), 1002);
+  tracker.queueTurnContext(ordinary);
+  tracker.beginTurn(1003);
+
+  assert.throws(() => tracker.resolveReplyTarget({ to: "shared" }, 1004), /Multiple pending asks match sender name "shared"/);
+  assert.deepEqual(tracker.listPending(1004).map((context) => context.message.id), ["ask-1", "ask-2"]);
+});
+
+test("ordinary current context does not override ambiguous pending ID prefix", () => {
+  const tracker = new ReplyTracker();
+  const ordinary = tracker.recordIncomingMessage(createSession("ordinary-id", "ordinary"), createMessage("message-1", "Status update", false), 1000);
+  tracker.recordIncomingMessage(createSession("abc-one", "first"), createMessage("ask-1", "First"), 1001);
+  tracker.recordIncomingMessage(createSession("abc-two", "second"), createMessage("ask-2", "Second"), 1002);
+  tracker.queueTurnContext(ordinary);
+  tracker.beginTurn(1003);
+
+  assert.throws(() => tracker.resolveReplyTarget({ to: "abc" }, 1004), /Multiple pending asks match ID prefix "abc"/);
+  assert.deepEqual(tracker.listPending(1004).map((context) => context.message.id), ["ask-1", "ask-2"]);
+});
+
 test("reply with to resolves matching pending ask", () => {
   const tracker = new ReplyTracker();
   tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "First"), 1000);
@@ -93,6 +162,15 @@ test("explicit to overrides the current turn context", () => {
   assert.throws(() => tracker.resolveReplyTarget({ to: "missing" }, 1003), /No pending ask from/);
 });
 
+test("ordinary current context does not classify unrelated sends as misdirected ask replies", () => {
+  const tracker = new ReplyTracker();
+  const ordinary = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("message-1", "Status update", false), 1000);
+  tracker.queueTurnContext(ordinary);
+  tracker.beginTurn(1001);
+
+  assert.equal(tracker.findActiveReplyTargetMismatch("reviewer-id", 1002), null);
+});
+
 test("active ask context flags non-reply sends to a different target", () => {
   const tracker = new ReplyTracker();
   const current = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "Need a reply"), 1000);
@@ -133,7 +211,49 @@ test("reply errors when multiple pending asks and no to", () => {
   tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "First"), 1000);
   tracker.recordIncomingMessage(createSession("reviewer-id", "reviewer"), createMessage("ask-2", "Second"), 1001);
 
-  assert.throws(() => tracker.resolveReplyTarget({}, 1002), /Multiple pending asks — specify `to`/);
+  assert.throws(() => tracker.resolveReplyTarget({}, 1002), /Multiple pending asks — specify `replyTo` or `to`/);
+});
+
+test("current ask context cannot hide another pending ask", () => {
+  const tracker = new ReplyTracker();
+  const current = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "First"), 1000);
+  tracker.recordIncomingMessage(createSession("reviewer-id", "reviewer"), createMessage("ask-2", "Second"), 1001);
+  tracker.queueTurnContext(current);
+  tracker.beginTurn(1002);
+
+  assert.throws(() => tracker.resolveReplyTarget({}, 1003), /Multiple pending asks — specify `replyTo` or `to`/);
+  assert.equal(tracker.resolveReplyTarget({ replyTo: "ask-1" }, 1003).message.id, "ask-1");
+  assert.equal(tracker.resolveReplyTarget({ to: "reviewer" }, 1003).message.id, "ask-2");
+});
+
+test("same-sender asks cannot fall back to the current ask after ambiguous to", () => {
+  const tracker = new ReplyTracker();
+  const current = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "First"), 1000);
+  tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-2", "Second"), 1001);
+  tracker.queueTurnContext(current);
+  tracker.beginTurn(1002);
+
+  assert.throws(() => tracker.resolveReplyTarget({ to: "planner-id" }, 1003), /Multiple pending asks from session ID/);
+  assert.throws(() => tracker.resolveReplyTarget({ to: "planner" }, 1003), /Multiple pending asks match sender name/);
+});
+
+test("expired current ask yields the sole remaining pending ask", () => {
+  const tracker = new ReplyTracker(10);
+  const current = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "First"), 1000);
+  tracker.recordIncomingMessage(createSession("reviewer-id", "reviewer"), createMessage("ask-2", "Second"), 1005);
+  tracker.queueTurnContext(current);
+  tracker.beginTurn(1006);
+
+  assert.equal(tracker.resolveReplyTarget({}, 1011).message.id, "ask-2");
+});
+
+test("non-pending queued ask contexts cannot be replied to", () => {
+  const tracker = new ReplyTracker();
+  tracker.queueTurnContext({ from: createSession("planner-id", "planner"), message: createMessage("ask-missing", "Not pending"), receivedAt: 1000 });
+  tracker.beginTurn(1001);
+
+  assert.throws(() => tracker.resolveReplyTarget({}, 1002), /Current ask "ask-missing" is expired or no longer pending/);
+  assert.throws(() => tracker.resolveReplyTarget({ to: "planner-id" }, 1002), /No pending ask from/);
 });
 
 test("reply removes pending ask after successful reply", () => {

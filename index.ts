@@ -1270,9 +1270,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       return;
     }
     const injectedMessage = { ...entry.message, injectedAt: Date.now() };
-    const replyCommand = delivery === "steer" && entry.replyCommand && entry.message.expectsReply
-      ? `intercom({ action: "reply", replyTo: ${JSON.stringify(entry.message.id)}, message: "..." })`
-      : entry.replyCommand;
+    const replyCommand = entry.replyCommand;
     const deliveredEntry = { ...entry, message: injectedMessage, replyCommand };
     replyTracker.queueTurnContext({ from: entry.from, message: injectedMessage, receivedAt: Date.now() });
     const senderDisplay = injectedMessage.crossMachine
@@ -1379,7 +1377,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     const replyCommand = config.replyHint && receivedMessage.crossMachine
       ? `intercom({ action: "send", to: ${JSON.stringify(relaySenderName(receivedMessage.crossMachine.origin))}, message: "..." })`
       : config.replyHint && receivedMessage.expectsReply
-        ? `intercom({ action: "reply", message: "..." })`
+        ? `intercom({ action: "reply", replyTo: ${JSON.stringify(receivedMessage.id)}, message: "..." })`
         : undefined;
     replyTracker.recordIncomingMessage(from, receivedMessage, receiverReceivedAt);
     emitMessageReceipt(receivedMessage.id, "acknowledged", "accepted by receiver");
@@ -1747,7 +1745,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       if (activeReplyMismatch) {
         const senderLabel = activeReplyMismatch.from.name || activeReplyMismatch.from.id;
         return {
-          content: [{ type: "text", text: `This turn is responding to an intercom ask from "${senderLabel}". Use intercom({ action: "reply", message: "..." }) or set replyTo: "${activeReplyMismatch.message.id}". Refusing non-reply send to "${targetDisplay}" to avoid a misdirected reply.` }],
+          content: [{ type: "text", text: `This turn is responding to an intercom ask from "${senderLabel}". Use intercom({ action: "reply", replyTo: "${activeReplyMismatch.message.id}", message: "..." }) or set replyTo: "${activeReplyMismatch.message.id}". Refusing non-reply send to "${targetDisplay}" to avoid a misdirected reply.` }],
           details: { error: true, replyTo: activeReplyMismatch.message.id },
         };
       }
@@ -2437,7 +2435,7 @@ Usage:
   intercom({ action: "handover", to: "name-or-id", message: "next task" }) → Summarize this session and hand it over; the receiver acts on it
   intercom({ action: "handover", cwd: "/path", openProjectPaneIfMissing: true }) → Hand over to the session in that project, opening a Herdr pane when needed
   intercom({ action: "cancel", messageId: "..." })                 → Request cancellation of a sent message
-  intercom({ action: "reply", message: "..." })                      → Reply to the active/single pending ask
+  intercom({ action: "reply", replyTo: "message-id", message: "..." }) → Reply to that exact inbound ask; use its displayed replyTo command
   intercom({ action: "pending" })                                      → List unresolved inbound asks
   intercom({ action: "status" })                  → Show connection status`,
     promptSnippet:
@@ -2460,7 +2458,7 @@ Usage:
         language: Type.Optional(Type.String()),
       }))),
       replyTo: Type.Optional(Type.String({
-        description: "Message ID to reply to (for threading or responding to an 'ask')",
+        description: "Exact inbound ask message ID from its displayed reply command. Use this when answering an ask; multiple pending asks must be disambiguated.",
       })),
       messageId: Type.Optional(Type.String({
         description: "Message ID for actions that operate on an existing message, such as 'cancel'.",
@@ -2796,31 +2794,34 @@ Usage:
                 details: { error: true },
               };
             }
+            const pendingReplyTo = target.message.expectsReply ? target.message.id : undefined;
             const result = await connectedClient.send(target.from.id, {
               text: message,
               attachments,
-              replyTo: target.message.id,
+              ...(pendingReplyTo ? { replyTo: pendingReplyTo } : {}),
             });
             if (!result.delivered) {
               const errorText = result.reason ?? "Session may not exist or has disconnected.";
-              if (result.reason === "Session not found") {
-                dismissIncomingAsk(target.message.id);
+              if (pendingReplyTo && result.reason === "Session not found") {
+                dismissIncomingAsk(pendingReplyTo);
               }
               return {
-                content: [{ type: "text", text: `Reply to "${target.from.name || target.from.id}" was not delivered: ${errorText}` }],
+                content: [{ type: "text", text: `${pendingReplyTo ? "Reply" : "Response"} to "${target.from.name || target.from.id}" was not delivered: ${errorText}` }],
                 details: deliveryDetails(result),
               };
             }
-            dismissIncomingAsk(target.message.id);
+            if (pendingReplyTo) {
+              dismissIncomingAsk(pendingReplyTo);
+            }
             pi.appendEntry("intercom_sent", {
               to: target.from.name || target.from.id,
-              message: { text: message, attachments, replyTo: target.message.id },
+              message: { text: message, attachments, ...(pendingReplyTo ? { replyTo: pendingReplyTo } : {}) },
               messageId: result.id,
               timestamp: Date.now(),
             });
             return {
-              content: [{ type: "text", text: `Reply sent to ${target.from.name || target.from.id}` }],
-              details: { ...deliveryDetails(result), replyTo: target.message.id },
+              content: [{ type: "text", text: pendingReplyTo ? `Reply sent to ${target.from.name || target.from.id}` : `Response sent to ${target.from.name || target.from.id}` }],
+              details: { ...deliveryDetails(result), ...(pendingReplyTo ? { replyTo: pendingReplyTo } : {}) },
             };
           } catch (error) {
             return {
