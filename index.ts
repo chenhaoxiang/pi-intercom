@@ -29,7 +29,7 @@ import {
   type IntercomOutboxResultV1,
   type IntercomSessionIdentityRequestV1,
 } from "./extension-api.ts";
-import { ReplyTracker } from "./reply-tracker.ts";
+import { ReplyTracker, type IntercomContext } from "./reply-tracker.ts";
 import { homedir } from "node:os";
 import { join as joinPath, resolve as resolvePath } from "node:path";
 import { sameCwd } from "./cwd.ts";
@@ -698,6 +698,51 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   function dismissIncomingAsk(messageId: string): void {
     replyTracker.dismissPendingAsk(messageId);
     dropHeldInboundMessage(messageId, { status: "acknowledged", detail: "answered before injection" });
+  }
+  async function resolveReplyTarget(activeClient: IntercomClient, options: { to?: string; replyTo?: string }): Promise<IntercomContext> {
+    try {
+      return replyTracker.resolveReplyTarget(options);
+    } catch (trackerError) {
+      // A restarted session loses its in-memory tracker. Only an exact
+      // replyTo may recover from durable broker state; never infer a target
+      // from a name, prefix, or the question text.
+      if (!options.replyTo) {
+        throw trackerError;
+      }
+      let durableAsks: PendingAsk[];
+      try {
+        durableAsks = await activeClient.listPendingAsks();
+      } catch {
+        throw trackerError;
+      }
+      const currentId = activeClient.sessionId;
+      const ask = durableAsks.find((candidate) => candidate.messageId === options.replyTo
+        && candidate.target.sessionId === currentId
+        && (!options.to
+          || candidate.asker.sessionId === options.to
+          || candidate.asker.name?.toLowerCase() === options.to.toLowerCase()));
+      if (!ask) {
+        throw trackerError;
+      }
+      return {
+        from: {
+          id: ask.asker.sessionId,
+          ...(ask.asker.name !== null ? { name: ask.asker.name } : {}),
+          cwd: "",
+          model: "unknown",
+          pid: 0,
+          startedAt: ask.createdAt,
+          lastActivity: ask.createdAt,
+        },
+        message: {
+          id: ask.messageId,
+          timestamp: ask.createdAt,
+          expectsReply: true,
+          content: { text: ask.question },
+        },
+        receivedAt: ask.createdAt,
+      };
+    }
   }
   function hasSeenInboundMessage(from: SessionInfo, message: Message, now = Date.now()): boolean {
     for (const [key, seenAt] of seenInboundMessages) {
@@ -2787,7 +2832,7 @@ Usage:
           }
 
           try {
-            const target = replyTracker.resolveReplyTarget({ to, replyTo });
+            const target = await resolveReplyTarget(connectedClient, { to, replyTo });
             if (target.from.id === connectedClient.sessionId) {
               return {
                 content: [{ type: "text", text: "Cannot message the current session" }],

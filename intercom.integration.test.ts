@@ -3292,6 +3292,80 @@ test("broker rehydrates pending ask routing after restart and preserves exact re
   }
 });
 
+test("broker preserves legacy unscoped pending records and removes scope-mismatched filenames", { concurrency: false }, async () => {
+  const { planner, orchestrator, restartBroker, cleanup } = await setupClients();
+  const askId = "legacy-scope-filename-check";
+  const filePath = pendingAskRecordPath(askId);
+  const legacyAskId = "legacy-unscoped-record";
+  const legacyPath = pendingAskRecordPath(legacyAskId);
+  try {
+    const createdAt = Date.now();
+    writeFileSync(filePath, `${JSON.stringify({
+      askId,
+      messageId: askId,
+      asker: { sessionId: planner.sessionId, name: "planner" },
+      target: { sessionId: orchestrator.sessionId, name: "orchestrator" },
+      scopeId: "scope-a",
+      question: "Must not be reused from an unscoped filename.",
+      createdAt,
+      expiresAt: createdAt + 60_000,
+    })}\n`);
+    writeFileSync(legacyPath, `${JSON.stringify({
+      askId: legacyAskId,
+      messageId: legacyAskId,
+      asker: { sessionId: planner.sessionId, name: "planner" },
+      target: { sessionId: orchestrator.sessionId, name: "orchestrator" },
+      question: "Legacy unscoped records remain compatible.",
+      createdAt,
+      expiresAt: createdAt + 60_000,
+    })}\n`);
+    await planner.disconnect();
+    await orchestrator.disconnect();
+    await restartBroker();
+    assert.equal(existsSync(filePath), false);
+    assert.equal(existsSync(legacyPath), true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("intercom reply uses an exact durable ask after the receiver session restarts", { concurrency: false }, async () => {
+  const { planner, orchestrator, restartBroker, cleanup } = await setupClients();
+  const askId = "durable-reply-action-ask";
+  const plannerId = planner.sessionId!;
+  const orchestratorId = orchestrator.sessionId!;
+  let replacementPlanner: IntercomClient | undefined;
+  let harness: ReturnType<typeof createExtensionHarness> | undefined;
+
+  try {
+    assert.equal((await planner.send(orchestratorId, { messageId: askId, text: "Reply after restart?", expectsReply: true })).delivered, true);
+    await planner.disconnect();
+    await orchestrator.disconnect();
+    await restartBroker();
+
+    replacementPlanner = new IntercomClient();
+    await replacementPlanner.connect({ name: "planner", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, plannerId);
+    const { default: piIntercomExtension } = await import("./index.ts");
+    harness = createExtensionHarness("orchestrator", { sessionId: orchestratorId });
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const reply = waitForReply(replacementPlanner, askId);
+    const result = await intercomTool.execute("durable-reply-action", {
+      action: "reply",
+      replyTo: askId,
+      message: "Recovered answer.",
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(result.details?.delivered, true);
+    assert.match(result.content[0]?.text ?? "", /Reply sent/);
+    assert.equal((await reply).message.replyTo, askId);
+  } finally {
+    if (harness) await harness.emitLifecycle("session_shutdown").catch(() => undefined);
+    await replacementPlanner?.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
 test("pending ask visibility includes inbound and outbound durable asks after stable-session reconnect", { concurrency: false }, async () => {
   const { planner, orchestrator, cleanup } = await setupClients();
   const askId = "pending-visibility-restart-ask";
