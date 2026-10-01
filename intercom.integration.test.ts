@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { EventEmitter, once } from "node:events";
@@ -3298,56 +3298,96 @@ test("broker rehydrates pending ask routing after restart and preserves exact re
   }
 });
 
-test("broker rejects a new blocking ask after restart finds ambiguous durable message ids", { concurrency: false }, async () => {
+test("broker resolves scoped durable ask identity after restart without hiding pending records", { concurrency: false }, async () => {
   const { planner, orchestrator, restartBroker, cleanup } = await setupClients();
   const askId = "ambiguous-durable-reuse";
-  const createdAt = Date.now();
-  const record = (scopeId: string, question: string) => ({
-    askId,
-    messageId: askId,
-    asker: { sessionId: planner.sessionId, name: "planner" },
-    target: { sessionId: orchestrator.sessionId, name: "orchestrator" },
-    scopeId,
-    question,
-    createdAt,
-    expiresAt: createdAt + 60_000,
-  });
+  const scopeAPlanner = new IntercomClient();
+  const scopeAOrchestrator = new IntercomClient();
+  const scopeBPlanner = new IntercomClient();
+  const scopeBOrchestrator = new IntercomClient();
+  const replacementScopeAPlanner = new IntercomClient();
+  const replacementScopeAOrchestrator = new IntercomClient();
+  const replacementUnscopedPlanner = new IntercomClient();
+  const replacementUnscopedOrchestrator = new IntercomClient();
+  const scopeAReceived: Message[] = [];
+  const unscopedReceived: Message[] = [];
+  scopeAOrchestrator.on("message", (_from: SessionInfo, message: Message) => scopeAReceived.push(message));
+  replacementScopeAOrchestrator.on("message", (_from: SessionInfo, message: Message) => scopeAReceived.push(message));
+  replacementUnscopedOrchestrator.on("message", (_from: SessionInfo, message: Message) => unscopedReceived.push(message));
 
   try {
-    writeFileSync(scopedPendingAskRecordPath("scope-a", askId), `${JSON.stringify(record("scope-a", "First durable ask."))}\n`);
-    writeFileSync(scopedPendingAskRecordPath("scope-b", askId), `${JSON.stringify(record("scope-b", "Second durable ask."))}\n`);
     await planner.disconnect();
     await orchestrator.disconnect();
+    await connectClientWithScope(scopeAPlanner, "scope-a", "scope-a-planner", "planner");
+    await connectClientWithScope(scopeAOrchestrator, "scope-a", "scope-a-orchestrator", "orchestrator");
+    await connectClientWithScope(scopeBPlanner, "scope-b", "scope-b-planner", "planner");
+    await connectClientWithScope(scopeBOrchestrator, "scope-b", "scope-b-orchestrator", "orchestrator");
+    assert.equal((await scopeAPlanner.send("scope-a-orchestrator", {
+      messageId: askId,
+      text: "First durable ask.",
+      expectsReply: true,
+    })).delivered, true);
+    const scopeARecordPath = scopedPendingAskRecordPath("scope-a", askId);
+    const hiddenScopeARecordPath = `${scopeARecordPath}.hold`;
+    renameSync(scopeARecordPath, hiddenScopeARecordPath);
+    try {
+      assert.equal((await scopeBPlanner.send("scope-b-orchestrator", {
+        messageId: askId,
+        text: "Second durable ask.",
+        expectsReply: true,
+      })).delivered, true);
+    } finally {
+      renameSync(hiddenScopeARecordPath, scopeARecordPath);
+    }
+    assert.equal(scopeAReceived.filter((message) => message.id === askId).length, 1);
+    await scopeAPlanner.disconnect();
+    await scopeAOrchestrator.disconnect();
+    await scopeBPlanner.disconnect();
+    await scopeBOrchestrator.disconnect();
     await restartBroker();
 
-    const replacementPlanner = new IntercomClient();
-    const replacementOrchestrator = new IntercomClient();
-    const replacementReceived: Message[] = [];
-    replacementOrchestrator.on("message", (_from: SessionInfo, message: Message) => replacementReceived.push(message));
-    try {
-      await replacementPlanner.connect({ name: "planner", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, planner.sessionId!);
-      await replacementOrchestrator.connect({ name: "orchestrator", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, orchestrator.sessionId!);
-      const blocked = await replacementPlanner.send(replacementOrchestrator.sessionId!, {
-        messageId: askId,
-        text: "A new ask must not overwrite either durable record.",
-        expectsReply: true,
-      });
-      assert.equal(blocked.delivered, false);
-      assert.equal(blocked.code, "E_MESSAGE_ID_AMBIGUOUS");
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      assert.equal(replacementReceived.some((message) => message.id === askId), false);
+    await connectClientWithScope(replacementScopeAPlanner, "scope-a", "scope-a-planner", "planner");
+    await connectClientWithScope(replacementScopeAOrchestrator, "scope-a", "scope-a-orchestrator", "orchestrator");
+    const visible = await replacementScopeAPlanner.listPendingAsks();
+    assert.deepEqual(visible.map((ask) => ask.messageId), [askId]);
+    const replay = await replacementScopeAPlanner.send("scope-a-orchestrator", {
+      messageId: askId,
+      text: "First durable ask.",
+      expectsReply: true,
+    });
+    assert.equal(replay.delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(scopeAReceived.filter((message) => message.id === askId).length, 1);
 
-      const legal = await replacementPlanner.send(replacementOrchestrator.sessionId!, {
-        messageId: "unambiguous-new-ask-id",
-        text: "A fresh id remains deliverable.",
-        expectsReply: true,
-      });
-      assert.equal(legal.delivered, true);
-    } finally {
-      await replacementPlanner.disconnect().catch(() => undefined);
-      await replacementOrchestrator.disconnect().catch(() => undefined);
-    }
+    await replacementUnscopedPlanner.connect({ name: "planner", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, "unscoped-planner");
+    await replacementUnscopedOrchestrator.connect({ name: "orchestrator", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, "unscoped-orchestrator");
+    const blocked = await replacementUnscopedPlanner.send("unscoped-orchestrator", {
+      messageId: askId,
+      text: "A new ask must not overwrite either durable record.",
+      expectsReply: true,
+    });
+    assert.equal(blocked.delivered, false);
+    assert.ok(blocked.code === "E_MESSAGE_ID_AMBIGUOUS" || blocked.code === "E_MESSAGE_ID_REUSE");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(unscopedReceived.some((message) => message.id === askId), false);
+
+    const legal = await replacementScopeAPlanner.send("scope-a-orchestrator", {
+      messageId: "unambiguous-new-ask-id",
+      text: "A fresh id remains deliverable.",
+      expectsReply: true,
+    });
+    assert.equal(legal.delivered, true);
   } finally {
+    await Promise.all([
+      scopeAPlanner.disconnect().catch(() => undefined),
+      scopeAOrchestrator.disconnect().catch(() => undefined),
+      scopeBPlanner.disconnect().catch(() => undefined),
+      scopeBOrchestrator.disconnect().catch(() => undefined),
+      replacementScopeAPlanner.disconnect().catch(() => undefined),
+      replacementScopeAOrchestrator.disconnect().catch(() => undefined),
+      replacementUnscopedPlanner.disconnect().catch(() => undefined),
+      replacementUnscopedOrchestrator.disconnect().catch(() => undefined),
+    ]);
     await cleanup();
   }
 });

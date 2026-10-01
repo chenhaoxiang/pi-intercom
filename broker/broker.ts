@@ -1226,13 +1226,6 @@ class IntercomBroker {
     from: ConnectedSession,
     target: SessionInfo,
   ): "replay" | { code: "E_MESSAGE_ID_AMBIGUOUS" | "E_MESSAGE_ID_REUSE"; reason: string } | null {
-    if (this.ambiguousAskEdges.has(message.id)) {
-      return {
-        code: "E_MESSAGE_ID_AMBIGUOUS",
-        reason: "Message id matches multiple durable pending asks; refusing to create a new blocking ask",
-      };
-    }
-
     ensurePendingAskRecordDir();
     const records: PendingAskRecord[] = [];
     for (const entry of readdirSync(PENDING_ASKS_DIR, { withFileTypes: true })) {
@@ -1252,22 +1245,29 @@ class IntercomBroker {
       records.push(parsed);
     }
 
-    if (records.length === 0) return null;
-    if (records.length > 1) {
+    if (records.length === 0) {
+      return this.ambiguousAskEdges.has(message.id)
+        ? {
+          code: "E_MESSAGE_ID_AMBIGUOUS",
+          reason: "Message id matches multiple durable pending asks; refusing to create a new blocking ask",
+        }
+        : null;
+    }
+
+    const fingerprint = this.deliveryFingerprint(message, target.id);
+    const matchingRecords = records.filter((existing) => existing.scopeId === from.scopeId
+      && existing.asker.sessionId === from.info.id
+      && existing.target.sessionId === target.id
+      && (existing.fingerprint
+        ? existing.fingerprint === fingerprint
+        : existing.question === message.content.text));
+    if (matchingRecords.length === 1) return "replay";
+    if (matchingRecords.length > 1 || records.length > 1 || this.ambiguousAskEdges.has(message.id)) {
       return {
         code: "E_MESSAGE_ID_AMBIGUOUS",
         reason: "Message id matches multiple durable pending asks; refusing to create a new blocking ask",
       };
     }
-
-    const existing = records[0]!;
-    const sameAsk = existing.scopeId === from.scopeId
-      && existing.asker.sessionId === from.info.id
-      && existing.target.sessionId === target.id
-      && (existing.fingerprint
-        ? existing.fingerprint === this.deliveryFingerprint(message, target.id)
-        : existing.question === message.content.text);
-    if (sameAsk) return "replay";
 
     return {
       code: "E_MESSAGE_ID_REUSE",
@@ -1353,6 +1353,9 @@ class IntercomBroker {
         ? scopedPendingAskRecordPath(parsed.scopeId, parsed.messageId)
         : pendingAskRecordPath(parsed.messageId);
       if (join(PENDING_ASKS_DIR, entry.name) !== expectedPath) continue;
+      // Scope is the visibility boundary. Duplicate IDs in another scope must
+      // not hide this scope's otherwise recoverable durable ask.
+      if (!sameScope(parsed.scopeId, scopeId)) continue;
       if (ambiguous.has(parsed.messageId)) continue;
       if (records.has(parsed.messageId)) {
         records.delete(parsed.messageId);
