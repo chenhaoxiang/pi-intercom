@@ -3392,6 +3392,109 @@ test("broker resolves scoped durable ask identity after restart without hiding p
   }
 });
 
+test("broker keeps same-id rehydrated ask edges isolated by scope", { concurrency: false }, async () => {
+  const { planner, orchestrator, restartBroker, cleanup } = await setupClients();
+  const askId = "same-id-rehydrated-ask";
+  const scopeAPlanner = new IntercomClient();
+  const scopeAOrchestrator = new IntercomClient();
+  const scopeBPlanner = new IntercomClient();
+  const scopeBOrchestrator = new IntercomClient();
+  const replacementAPlanner = new IntercomClient();
+  const replacementAOrchestrator = new IntercomClient();
+  const replacementBPlanner = new IntercomClient();
+  const replacementBOrchestrator = new IntercomClient();
+
+  try {
+    await planner.disconnect();
+    await orchestrator.disconnect();
+    await connectClientWithScope(scopeAPlanner, "scope-a", "scope-a-planner", "planner");
+    await connectClientWithScope(scopeAOrchestrator, "scope-a", "scope-a-orchestrator", "orchestrator");
+    await connectClientWithScope(scopeBPlanner, "scope-b", "scope-b-planner", "planner");
+    await connectClientWithScope(scopeBOrchestrator, "scope-b", "scope-b-orchestrator", "orchestrator");
+    assert.equal((await scopeAPlanner.send("scope-a-orchestrator", { messageId: askId, text: "Ask from A", expectsReply: true })).delivered, true);
+    assert.equal((await scopeBPlanner.send("scope-b-orchestrator", { messageId: askId, text: "Ask from B", expectsReply: true })).delivered, true);
+
+    await Promise.all([
+      scopeAPlanner.disconnect(),
+      scopeAOrchestrator.disconnect(),
+      scopeBPlanner.disconnect(),
+      scopeBOrchestrator.disconnect(),
+    ]);
+    await restartBroker();
+    await connectClientWithScope(replacementAPlanner, "scope-a", "scope-a-planner", "planner");
+    await connectClientWithScope(replacementAOrchestrator, "scope-a", "scope-a-orchestrator", "orchestrator");
+    await connectClientWithScope(replacementBPlanner, "scope-b", "scope-b-planner", "planner");
+    await connectClientWithScope(replacementBOrchestrator, "scope-b", "scope-b-orchestrator", "orchestrator");
+
+    const replyA = waitForReply(replacementAPlanner, askId);
+    const replyB = waitForReply(replacementBPlanner, askId);
+    assert.equal((await replacementAOrchestrator.send("scope-a-planner", { messageId: "same-id-reply-a", text: "Reply from A", replyTo: askId })).delivered, true);
+    assert.equal((await replacementBOrchestrator.send("scope-b-planner", { messageId: "same-id-reply-b", text: "Reply from B", replyTo: askId })).delivered, true);
+    assert.equal((await replyA).message.content.text, "Reply from A");
+    assert.equal((await replyB).message.content.text, "Reply from B");
+  } finally {
+    await Promise.all([
+      scopeAPlanner.disconnect().catch(() => undefined),
+      scopeAOrchestrator.disconnect().catch(() => undefined),
+      scopeBPlanner.disconnect().catch(() => undefined),
+      scopeBOrchestrator.disconnect().catch(() => undefined),
+      replacementAPlanner.disconnect().catch(() => undefined),
+      replacementAOrchestrator.disconnect().catch(() => undefined),
+      replacementBPlanner.disconnect().catch(() => undefined),
+      replacementBOrchestrator.disconnect().catch(() => undefined),
+    ]);
+    await cleanup();
+  }
+});
+
+test("broker isolates same-id receipt and cancellation routes by sender scope", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const scopeAPlanner = new IntercomClient();
+  const scopeAOrchestrator = new IntercomClient();
+  const scopeBPlanner = new IntercomClient();
+  const scopeBOrchestrator = new IntercomClient();
+  const messageId = "same-id-ordinary-message";
+  const receiptsA: string[] = [];
+  const receiptsB: string[] = [];
+  const controlsA: string[] = [];
+  const controlsB: string[] = [];
+  const unsubscribeReceiptA = scopeAPlanner.onMessageReceipt((_from, receipt) => receiptsA.push(receipt.status));
+  const unsubscribeReceiptB = scopeBPlanner.onMessageReceipt((_from, receipt) => receiptsB.push(receipt.status));
+  const unsubscribeControlA = scopeAOrchestrator.onMessageControl((_from, control) => controlsA.push(control.action));
+  const unsubscribeControlB = scopeBOrchestrator.onMessageControl((_from, control) => controlsB.push(control.action));
+
+  try {
+    await planner.disconnect();
+    await orchestrator.disconnect();
+    await connectClientWithScope(scopeAPlanner, "scope-a", "scope-a-planner", "planner");
+    await connectClientWithScope(scopeAOrchestrator, "scope-a", "scope-a-orchestrator", "orchestrator");
+    await connectClientWithScope(scopeBPlanner, "scope-b", "scope-b-planner", "planner");
+    await connectClientWithScope(scopeBOrchestrator, "scope-b", "scope-b-orchestrator", "orchestrator");
+
+    assert.equal((await scopeAPlanner.send("scope-a-orchestrator", { messageId, text: "Message A" })).delivered, true);
+    assert.equal((await scopeBPlanner.send("scope-b-orchestrator", { messageId, text: "Message B" })).delivered, true);
+    scopeAOrchestrator.sendMessageReceipt({ messageId, status: "receiver_received", timestamp: Date.now() });
+    scopeBOrchestrator.sendMessageReceipt({ messageId, status: "receiver_received", timestamp: Date.now() });
+    await waitForCondition(() => receiptsA.includes("receiver_received") && receiptsB.includes("receiver_received"), "same-id scoped receipts");
+
+    assert.equal((await scopeAPlanner.cancelMessage(messageId)).delivered, true);
+    assert.equal((await scopeBPlanner.cancelMessage(messageId)).delivered, true);
+    await waitForCondition(() => controlsA.includes("cancel") && controlsB.includes("cancel"), "same-id scoped cancellations");
+  } finally {
+    unsubscribeReceiptA();
+    unsubscribeReceiptB();
+    unsubscribeControlA();
+    unsubscribeControlB();
+    await Promise.all([
+      scopeAPlanner.disconnect().catch(() => undefined),
+      scopeAOrchestrator.disconnect().catch(() => undefined),
+      scopeBPlanner.disconnect().catch(() => undefined),
+      scopeBOrchestrator.disconnect().catch(() => undefined),
+    ]);
+    await cleanup();
+  }
+});
+
 test("broker preserves legacy unscoped pending records and removes scope-mismatched filenames", { concurrency: false }, async () => {
   const { planner, orchestrator, restartBroker, cleanup } = await setupClients();
   const askId = "legacy-scope-filename-check";
