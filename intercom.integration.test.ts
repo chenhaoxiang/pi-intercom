@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
@@ -541,6 +542,11 @@ async function waitForReplyMessage(messages: Message[], messageId: string, timeo
 
 function pendingAskRecordPath(messageId: string): string {
   return path.join(sharedHomeDir, ".pi", "agent", "intercom", "pending-asks", `${encodeURIComponent(messageId)}.json`);
+}
+
+function scopedPendingAskRecordPath(scopeId: string, messageId: string): string {
+  const scopeHash = createHash("sha256").update(scopeId).digest("hex");
+  return path.join(sharedHomeDir, ".pi", "agent", "intercom", "pending-asks", `${scopeHash}-${encodeURIComponent(messageId)}.json`);
 }
 
 function readPendingAskRecord(messageId: string): Record<string, unknown> {
@@ -3288,6 +3294,60 @@ test("broker rehydrates pending ask routing after restart and preserves exact re
   } finally {
     await replacementPlanner?.disconnect().catch(() => undefined);
     await replacementOrchestrator?.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("broker rejects a new blocking ask after restart finds ambiguous durable message ids", { concurrency: false }, async () => {
+  const { planner, orchestrator, restartBroker, cleanup } = await setupClients();
+  const askId = "ambiguous-durable-reuse";
+  const createdAt = Date.now();
+  const record = (scopeId: string, question: string) => ({
+    askId,
+    messageId: askId,
+    asker: { sessionId: planner.sessionId, name: "planner" },
+    target: { sessionId: orchestrator.sessionId, name: "orchestrator" },
+    scopeId,
+    question,
+    createdAt,
+    expiresAt: createdAt + 60_000,
+  });
+
+  try {
+    writeFileSync(scopedPendingAskRecordPath("scope-a", askId), `${JSON.stringify(record("scope-a", "First durable ask."))}\n`);
+    writeFileSync(scopedPendingAskRecordPath("scope-b", askId), `${JSON.stringify(record("scope-b", "Second durable ask."))}\n`);
+    await planner.disconnect();
+    await orchestrator.disconnect();
+    await restartBroker();
+
+    const replacementPlanner = new IntercomClient();
+    const replacementOrchestrator = new IntercomClient();
+    const replacementReceived: Message[] = [];
+    replacementOrchestrator.on("message", (_from: SessionInfo, message: Message) => replacementReceived.push(message));
+    try {
+      await replacementPlanner.connect({ name: "planner", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, planner.sessionId!);
+      await replacementOrchestrator.connect({ name: "orchestrator", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, orchestrator.sessionId!);
+      const blocked = await replacementPlanner.send(replacementOrchestrator.sessionId!, {
+        messageId: askId,
+        text: "A new ask must not overwrite either durable record.",
+        expectsReply: true,
+      });
+      assert.equal(blocked.delivered, false);
+      assert.equal(blocked.code, "E_MESSAGE_ID_AMBIGUOUS");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(replacementReceived.some((message) => message.id === askId), false);
+
+      const legal = await replacementPlanner.send(replacementOrchestrator.sessionId!, {
+        messageId: "unambiguous-new-ask-id",
+        text: "A fresh id remains deliverable.",
+        expectsReply: true,
+      });
+      assert.equal(legal.delivered, true);
+    } finally {
+      await replacementPlanner.disconnect().catch(() => undefined);
+      await replacementOrchestrator.disconnect().catch(() => undefined);
+    }
+  } finally {
     await cleanup();
   }
 });

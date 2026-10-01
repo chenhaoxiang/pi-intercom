@@ -100,7 +100,9 @@ interface AskEdge {
   createdAt: number;
 }
 
-interface PendingAskRecord extends PendingAsk {}
+interface PendingAskRecord extends PendingAsk {
+  fingerprint?: string;
+}
 
 interface MessageReceiptRoute {
   from: string;
@@ -685,6 +687,17 @@ class IntercomBroker {
           }
           const target = targets[0];
           const fingerprint = this.deliveryFingerprint(message, target.info.id);
+          if (message.expectsReply) {
+            const pendingAskCheck = this.checkPendingAskMessageId(message, fromSession, target.info);
+            if (pendingAskCheck === "replay") {
+              this.writeDeliverySuccess(socket, message.id, "socket_delivered");
+              break;
+            }
+            if (pendingAskCheck) {
+              this.writeDeliveryFailure(socket, message.id, pendingAskCheck.reason, pendingAskCheck.code);
+              break;
+            }
+          }
           if (this.replayOrReject(socket, currentKey, message.id, fingerprint)) {
             break;
           }
@@ -761,6 +774,17 @@ class IntercomBroker {
           const disconnectedTarget = disconnectedTargets[0]!;
           const target = disconnectedTarget.info;
           const fingerprint = this.deliveryFingerprint(message, target.id);
+          if (message.expectsReply) {
+            const pendingAskCheck = this.checkPendingAskMessageId(message, fromSession, target);
+            if (pendingAskCheck === "replay") {
+              this.writeDeliverySuccess(socket, message.id, "socket_delivered");
+              break;
+            }
+            if (pendingAskCheck) {
+              this.writeDeliveryFailure(socket, message.id, pendingAskCheck.reason, pendingAskCheck.code);
+              break;
+            }
+          }
           if (this.replayOrReject(socket, currentKey, message.id, fingerprint)) {
             break;
           }
@@ -1197,6 +1221,60 @@ class IntercomBroker {
     }
   }
 
+  private checkPendingAskMessageId(
+    message: Message,
+    from: ConnectedSession,
+    target: SessionInfo,
+  ): "replay" | { code: "E_MESSAGE_ID_AMBIGUOUS" | "E_MESSAGE_ID_REUSE"; reason: string } | null {
+    if (this.ambiguousAskEdges.has(message.id)) {
+      return {
+        code: "E_MESSAGE_ID_AMBIGUOUS",
+        reason: "Message id matches multiple durable pending asks; refusing to create a new blocking ask",
+      };
+    }
+
+    ensurePendingAskRecordDir();
+    const records: PendingAskRecord[] = [];
+    for (const entry of readdirSync(PENDING_ASKS_DIR, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      const filePath = join(PENDING_ASKS_DIR, entry.name);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(readFileSync(filePath, "utf-8"));
+      } catch {
+        continue;
+      }
+      if (!isPendingAskRecord(parsed) || parsed.messageId !== message.id) continue;
+      const expectedPath = parsed.scopeId
+        ? scopedPendingAskRecordPath(parsed.scopeId, parsed.messageId)
+        : pendingAskRecordPath(parsed.messageId);
+      if (filePath !== expectedPath || Date.now() > parsed.expiresAt) continue;
+      records.push(parsed);
+    }
+
+    if (records.length === 0) return null;
+    if (records.length > 1) {
+      return {
+        code: "E_MESSAGE_ID_AMBIGUOUS",
+        reason: "Message id matches multiple durable pending asks; refusing to create a new blocking ask",
+      };
+    }
+
+    const existing = records[0]!;
+    const sameAsk = existing.scopeId === from.scopeId
+      && existing.asker.sessionId === from.info.id
+      && existing.target.sessionId === target.id
+      && (existing.fingerprint
+        ? existing.fingerprint === this.deliveryFingerprint(message, target.id)
+        : existing.question === message.content.text);
+    if (sameAsk) return "replay";
+
+    return {
+      code: "E_MESSAGE_ID_REUSE",
+      reason: "Message id is still used by a different durable pending ask",
+    };
+  }
+
   private writePendingAskRecord(message: Message, from: ConnectedSession, target: SessionInfo, createdAt: number): void {
     ensurePendingAskRecordDir();
     const record: PendingAskRecord = {
@@ -1206,6 +1284,7 @@ class IntercomBroker {
       target: { sessionId: target.id, name: target.name ?? null },
       ...(from.scopeId ? { scopeId: from.scopeId } : {}),
       question: message.content.text,
+      fingerprint: this.deliveryFingerprint(message, target.id),
       createdAt,
       expiresAt: createdAt + this.askTimeoutMs,
     };
