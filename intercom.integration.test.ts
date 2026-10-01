@@ -2715,6 +2715,52 @@ test("replied steered asks are not injected again after the current turn", { con
   }
 });
 
+test("busy steered ordinary messages can be answered through the reply tool", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  let idle = false;
+  const harness = createExtensionHarness("ordinary-steer-worker", {
+    hasUI: true,
+    isIdle: () => idle,
+  });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const worker = await waitForSessionByName(planner, "ordinary-steer-worker");
+    await harness.emitLifecycle("agent_start");
+
+    assert.equal((await planner.send(worker.id, {
+      messageId: "ordinary-steer-message",
+      text: "A status update while busy.",
+    })).delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(harness.sentMessages.length, 1);
+    assert.equal(harness.sentMessages[0]?.options?.deliverAs, "steer");
+
+    await harness.emitLifecycle("turn_start");
+    const responseReceived = once(planner, "message") as Promise<[SessionInfo, Message]>;
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const result = await intercomTool.execute("ordinary-steer-reply", {
+      action: "reply",
+      message: "Acknowledged while busy.",
+    }, new AbortController().signal, undefined, harness.ctx);
+
+    assert.equal(result.details?.delivered, true);
+    assert.equal(result.details?.replyTo, undefined);
+    const [from, response] = await responseReceived;
+    assert.equal(from.id, worker.id);
+    assert.equal(response.content.text, "Acknowledged while busy.");
+    assert.equal(response.replyTo, undefined);
+
+    idle = true;
+    await harness.emitLifecycle("agent_end");
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("deferred startup connect is cancelled on shutdown", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { planner, cleanup } = await setupClients();
@@ -3587,6 +3633,49 @@ test("intercom reply responds safely to an ordinary inbound message", { concurre
     assert.equal(from.id, worker.id);
     assert.equal(response.content.text, "Acknowledged.");
     assert.equal(response.replyTo, undefined);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("failed ordinary-message reply does not clear an unrelated pending ask", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("ordinary-failure-worker");
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const worker = await waitForSessionByName(planner, "ordinary-failure-worker");
+    assert.equal((await planner.send(worker.id, {
+      messageId: "unrelated-pending-ask",
+      text: "Please decide.",
+      expectsReply: true,
+    })).delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await harness.emitLifecycle("turn_start");
+
+    assert.equal((await orchestrator.send(worker.id, {
+      messageId: "ordinary-failure-message",
+      text: "A regular update.",
+    })).delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await harness.emitLifecycle("turn_start");
+
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const result = await intercomTool.execute("ordinary-failure", {
+      action: "reply",
+      replyTo: "ordinary-failure-message",
+      message: "This must not be threaded.",
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(result.details?.error, true);
+    assert.match(result.content[0]?.text ?? "", /No pending ask with message ID/);
+
+    const pending = await intercomTool.execute("ordinary-failure-pending", {
+      action: "pending",
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.match(pending.content[0]?.text ?? "", /unrelated-pending-ask/);
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();

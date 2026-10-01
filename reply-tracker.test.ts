@@ -56,6 +56,39 @@ test("reply resolves an ordinary current-turn message only with its explicit sen
   assert.throws(() => tracker.resolveReplyTarget({ to: "reviewer" }, 1002), /No pending ask from "reviewer"/);
 });
 
+test("ordinary current-turn reply wins over an unrelated pending ask", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("reviewer-id", "reviewer"), createMessage("ask-1", "Need a decision"), 1000);
+  const ordinary = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("message-1", "Status update", false), 1001);
+  tracker.queueTurnContext(ordinary);
+  tracker.beginTurn(1002);
+
+  assert.equal(tracker.resolveReplyTarget({}, 1003).message.id, "message-1");
+  assert.deepEqual(tracker.listPending(1003).map((context) => context.message.id), ["ask-1"]);
+});
+
+test("explicit ordinary-message replyTo is rejected without falling back", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("reviewer-id", "reviewer"), createMessage("ask-1", "Need a decision"), 1000);
+  const ordinary = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("message-1", "Status update", false), 1001);
+  tracker.queueTurnContext(ordinary);
+  tracker.beginTurn(1002);
+
+  assert.throws(() => tracker.resolveReplyTarget({ replyTo: "message-1" }, 1003), /No pending ask with message ID "message-1"/);
+  assert.deepEqual(tracker.listPending(1003).map((context) => context.message.id), ["ask-1"]);
+});
+
+test("failed ordinary-message reply resolution preserves unrelated pending asks", () => {
+  const tracker = new ReplyTracker();
+  tracker.recordIncomingMessage(createSession("reviewer-id", "reviewer"), createMessage("ask-1", "Need a decision"), 1000);
+  const ordinary = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("message-1", "Status update", false), 1001);
+  tracker.queueTurnContext(ordinary);
+  tracker.beginTurn(1002);
+
+  assert.throws(() => tracker.resolveReplyTarget({ to: "missing" }, 1003), /No pending ask from "missing"/);
+  assert.deepEqual(tracker.listPending(1003).map((context) => context.message.id), ["ask-1"]);
+});
+
 test("reply with to resolves matching pending ask", () => {
   const tracker = new ReplyTracker();
   tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "First"), 1000);
@@ -102,6 +135,15 @@ test("explicit to overrides the current turn context", () => {
 
   assert.equal(tracker.resolveReplyTarget({ to: "reviewer" }, 1003).message.id, "ask-2");
   assert.throws(() => tracker.resolveReplyTarget({ to: "missing" }, 1003), /No pending ask from/);
+});
+
+test("ordinary current context does not classify unrelated sends as misdirected ask replies", () => {
+  const tracker = new ReplyTracker();
+  const ordinary = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("message-1", "Status update", false), 1000);
+  tracker.queueTurnContext(ordinary);
+  tracker.beginTurn(1001);
+
+  assert.equal(tracker.findActiveReplyTargetMismatch("reviewer-id", 1002), null);
 });
 
 test("active ask context flags non-reply sends to a different target", () => {
