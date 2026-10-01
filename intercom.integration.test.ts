@@ -3908,6 +3908,7 @@ test("intercom send refuses a different target during an active inbound ask turn
 
     assert.equal(result.details?.error, true);
     assert.equal(result.details?.replyTo, "cwd-hierarchy-ask");
+    assert.match(result.content[0]?.text ?? "", /action: "reply", replyTo: "cwd-hierarchy-ask"/);
     assert.match(result.content[0]?.text ?? "", /Refusing non-reply send to "orchestrator"/);
   } finally {
     await harness.emitLifecycle("session_shutdown");
