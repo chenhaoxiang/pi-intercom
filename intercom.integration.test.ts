@@ -2240,6 +2240,31 @@ test("idle interactive sessions trigger a new turn immediately", { concurrency: 
 	}
 });
 
+test("idle inbound asks include an exact replyTo hint", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  const harness = createExtensionHarness("idle-ask-hint-worker", { hasUI: true, isIdle: () => true });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const worker = await waitForSessionByName(planner, "idle-ask-hint-worker");
+    assert.equal((await planner.send(worker.id, {
+      messageId: "idle-exact-ask",
+      text: "Please answer this question.",
+      expectsReply: true,
+    })).delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(harness.sentMessages.length, 1);
+    assert.equal(harness.sentMessages[0]?.options?.triggerTurn, true);
+    assert.match(harness.sentMessages[0]?.message.content ?? "", /intercom\(\{ action: "reply", replyTo: "idle-exact-ask", message: "\.\.\." \}\)/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("broker rejects changed duplicate message IDs and replays identical sends without reinjection", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { planner, cleanup } = await setupClients();
@@ -3561,6 +3586,42 @@ test("full ask/reply round-trip works with reply target resolved from current tu
     assert.equal(reply.message.replyTo, askId);
     assert.deepEqual(replyTracker.listPending(Date.now()), []);
   } finally {
+    await cleanup();
+  }
+});
+
+test("multiple pending asks require an exact replyTo even during an ask turn", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("multiple-ask-routing-worker", { hasUI: true, isIdle: () => true });
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const worker = await waitForSessionByName(planner, "multiple-ask-routing-worker");
+    assert.equal((await planner.send(worker.id, { messageId: "multiple-ask-one", text: "First?", expectsReply: true })).delivered, true);
+    assert.equal((await orchestrator.send(worker.id, { messageId: "multiple-ask-two", text: "Second?", expectsReply: true })).delivered, true);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await harness.emitLifecycle("turn_start");
+
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const ambiguous = await intercomTool.execute("multiple-ask-ambiguous", {
+      action: "reply",
+      message: "Ambiguous answer.",
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(ambiguous.details?.error, true);
+    assert.match(ambiguous.content[0]?.text ?? "", /Multiple pending asks — specify `replyTo` or `to`/);
+
+    const replyReceived = waitForReply(orchestrator, "multiple-ask-two");
+    const exact = await intercomTool.execute("multiple-ask-exact", {
+      action: "reply",
+      replyTo: "multiple-ask-two",
+      message: "Second answer.",
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(exact.details?.delivered, true);
+    assert.equal((await replyReceived).message.content.text, "Second answer.");
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
     await cleanup();
   }
 });

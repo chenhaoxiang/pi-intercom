@@ -186,7 +186,50 @@ test("reply errors when multiple pending asks and no to", () => {
   tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "First"), 1000);
   tracker.recordIncomingMessage(createSession("reviewer-id", "reviewer"), createMessage("ask-2", "Second"), 1001);
 
-  assert.throws(() => tracker.resolveReplyTarget({}, 1002), /Multiple pending asks — specify `to`/);
+  assert.throws(() => tracker.resolveReplyTarget({}, 1002), /Multiple pending asks — specify `replyTo` or `to`/);
+});
+
+test("current ask context cannot hide another pending ask", () => {
+  const tracker = new ReplyTracker();
+  const current = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "First"), 1000);
+  tracker.recordIncomingMessage(createSession("reviewer-id", "reviewer"), createMessage("ask-2", "Second"), 1001);
+  tracker.queueTurnContext(current);
+  tracker.beginTurn(1002);
+
+  assert.throws(() => tracker.resolveReplyTarget({}, 1003), /Multiple pending asks — specify `replyTo` or `to`/);
+  assert.equal(tracker.resolveReplyTarget({ replyTo: "ask-1" }, 1003).message.id, "ask-1");
+  assert.equal(tracker.resolveReplyTarget({ to: "reviewer" }, 1003).message.id, "ask-2");
+});
+
+test("same-sender asks cannot fall back to the current ask after ambiguous to", () => {
+  const tracker = new ReplyTracker();
+  const current = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "First"), 1000);
+  tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-2", "Second"), 1001);
+  tracker.queueTurnContext(current);
+  tracker.beginTurn(1002);
+
+  assert.throws(() => tracker.resolveReplyTarget({ to: "planner-id" }, 1003), /Multiple pending asks from session ID/);
+  assert.throws(() => tracker.resolveReplyTarget({ to: "planner" }, 1003), /Multiple pending asks match sender name/);
+});
+
+test("expired current ask cannot fall back to another pending ask", () => {
+  const tracker = new ReplyTracker(10);
+  const current = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "First"), 1000);
+  tracker.recordIncomingMessage(createSession("reviewer-id", "reviewer"), createMessage("ask-2", "Second"), 1005);
+  tracker.queueTurnContext(current);
+  tracker.beginTurn(1006);
+
+  assert.throws(() => tracker.resolveReplyTarget({}, 1011), /Current ask "ask-1" is expired or no longer pending/);
+  assert.equal(tracker.resolveReplyTarget({ replyTo: "ask-2" }, 1011).from.id, "reviewer-id");
+});
+
+test("non-pending queued ask contexts cannot be replied to", () => {
+  const tracker = new ReplyTracker();
+  tracker.queueTurnContext({ from: createSession("planner-id", "planner"), message: createMessage("ask-missing", "Not pending"), receivedAt: 1000 });
+  tracker.beginTurn(1001);
+
+  assert.throws(() => tracker.resolveReplyTarget({}, 1002), /Current ask "ask-missing" is expired or no longer pending/);
+  assert.throws(() => tracker.resolveReplyTarget({ to: "planner-id" }, 1002), /No pending ask from/);
 });
 
 test("reply removes pending ask after successful reply", () => {

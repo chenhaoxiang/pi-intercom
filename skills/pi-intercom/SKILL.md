@@ -77,21 +77,22 @@ intercom({ action: "list" })
 
 ### Pattern 3: Reply Naturally
 
-When responding to an inbound ask, prefer `reply` instead of reconstructing raw IDs:
+When responding to an inbound ask, use the exact `replyTo` shown in the incoming message hint:
 
 ```typescript
 // In the turn triggered by the ask:
 intercom({
   action: "reply",
+  replyTo: "ask-123",
   message: "Use exponential backoff starting at 100ms."
 })
 
 // If replying later and there might be more than one pending ask:
 intercom({ action: "pending" })
-intercom({ action: "reply", to: "planner", message: "Use exponential backoff starting at 100ms." })
+intercom({ action: "reply", replyTo: "ask-123", message: "Use exponential backoff starting at 100ms." })
 ```
 
-`reply` still preserves exact threading under the hood by sending the response with the original `replyTo` value.
+The displayed ID is authoritative. If several asks are pending, omitting `replyTo` fails closed rather than guessing. Ordinary inbound messages can still receive a non-threaded response when no `replyTo` is supplied.
 
 ### Pattern 4: Broadcast to Multiple Workers
 
@@ -199,11 +200,11 @@ Which API should I use?
 **Reply using `reply`:**
 
 ```typescript
-// The reply hint in the incoming message will show the exact call:
-intercom({ action: "reply", message: "Use the stable v2 API." })
+// Copy the replyTo from the exact reply hint in the incoming message:
+intercom({ action: "reply", replyTo: "ask-123", message: "Use the stable v2 API." })
 ```
 
-This works because `reply` resolves the correct sender and message ID automatically.
+This routes to the session that sent that exact ask, independent of other pending asks.
 
 **Three types of escalations to expect:**
 
@@ -216,8 +217,8 @@ This works because `reply` resolves the correct sender and message ID automatica
 **When a subagent asks:**
 
 ```typescript
-// In the turn triggered by the incoming ask:
-intercom({ action: "reply", message: "Use exponential backoff, max 3 retries." })
+// Copy the exact replyTo shown with the incoming ask:
+intercom({ action: "reply", replyTo: "ask-123", message: "Use exponential backoff, max 3 retries." })
 ```
 
 **When a subagent sends an interview request:**
@@ -227,6 +228,7 @@ Read the rendered questions in the incoming message and reply with the exact ids
 ```typescript
 intercom({
   action: "reply",
+  replyTo: "interview-123",
   message: "```json\n{\n  \"responses\": [\n    { \"id\": \"api\", \"value\": \"Stable API\" },\n    { \"id\": \"constraints\", \"value\": \"Keep the public error shape unchanged.\" }\n  ]\n}\n```"
 })
 ```

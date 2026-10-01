@@ -79,6 +79,7 @@ export class ReplyTracker {
   }
 
   resolveReplyTarget(options: { to?: string; replyTo?: string }, now = Date.now()): IntercomContext {
+    const currentContext = this.currentTurnContext;
     this.pruneExpired(now);
 
     if (options.replyTo) {
@@ -100,11 +101,21 @@ export class ReplyTracker {
         // Ordinary inbound messages are turn contexts but not pending asks.
         // Permit an explicit response only when it addresses that exact
         // context; never fall back to an arbitrary destination.
-        if (this.currentTurnContext && matchesPendingSender(this.currentTurnContext, options.to)) {
+        if (this.currentTurnContext && !this.currentTurnContext.message.expectsReply && matchesPendingSender(this.currentTurnContext, options.to)) {
           return this.currentTurnContext;
         }
         throw error;
       }
+    }
+
+    if (currentContext?.message.expectsReply) {
+      if (!this.pendingAsks.has(currentContext.message.id)) {
+        throw new Error(`Current ask "${currentContext.message.id}" is expired or no longer pending — specify a pending \`replyTo\``);
+      }
+      if (pending.length > 1) {
+        throw new Error("Multiple pending asks — specify `replyTo` or `to`");
+      }
+      return this.pendingAsks.get(currentContext.message.id)!;
     }
 
     if (this.currentTurnContext) {
@@ -118,7 +129,7 @@ export class ReplyTracker {
       throw new Error("No active intercom context to reply to");
     }
 
-    throw new Error("Multiple pending asks — specify `to`");
+    throw new Error("Multiple pending asks — specify `replyTo` or `to`");
   }
 
   findUniquePendingAskFrom(to: string, now = Date.now()): IntercomContext | null {
