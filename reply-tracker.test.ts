@@ -89,6 +89,30 @@ test("failed ordinary-message reply resolution preserves unrelated pending asks"
   assert.deepEqual(tracker.listPending(1003).map((context) => context.message.id), ["ask-1"]);
 });
 
+test("ordinary current context does not override same-name pending ask ambiguity", () => {
+  const tracker = new ReplyTracker();
+  const ordinary = tracker.recordIncomingMessage(createSession("ordinary-id", "ordinary"), createMessage("message-1", "Status update", false), 1000);
+  tracker.recordIncomingMessage(createSession("pending-one", "shared"), createMessage("ask-1", "First"), 1001);
+  tracker.recordIncomingMessage(createSession("pending-two", "shared"), createMessage("ask-2", "Second"), 1002);
+  tracker.queueTurnContext(ordinary);
+  tracker.beginTurn(1003);
+
+  assert.throws(() => tracker.resolveReplyTarget({ to: "shared" }, 1004), /Multiple pending asks match sender name "shared"/);
+  assert.deepEqual(tracker.listPending(1004).map((context) => context.message.id), ["ask-1", "ask-2"]);
+});
+
+test("ordinary current context does not override ambiguous pending ID prefix", () => {
+  const tracker = new ReplyTracker();
+  const ordinary = tracker.recordIncomingMessage(createSession("ordinary-id", "ordinary"), createMessage("message-1", "Status update", false), 1000);
+  tracker.recordIncomingMessage(createSession("abc-one", "first"), createMessage("ask-1", "First"), 1001);
+  tracker.recordIncomingMessage(createSession("abc-two", "second"), createMessage("ask-2", "Second"), 1002);
+  tracker.queueTurnContext(ordinary);
+  tracker.beginTurn(1003);
+
+  assert.throws(() => tracker.resolveReplyTarget({ to: "abc" }, 1004), /Multiple pending asks match ID prefix "abc"/);
+  assert.deepEqual(tracker.listPending(1004).map((context) => context.message.id), ["ask-1", "ask-2"]);
+});
+
 test("reply with to resolves matching pending ask", () => {
   const tracker = new ReplyTracker();
   tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "First"), 1000);

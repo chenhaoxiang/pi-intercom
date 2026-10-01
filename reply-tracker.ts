@@ -15,6 +15,13 @@ function matchesPendingSender(context: IntercomContext, to: string): boolean {
   return context.from.name?.toLowerCase() === to.toLowerCase();
 }
 
+function hasPendingSenderMatch(pending: IntercomContext[], to: string): boolean {
+  const lowerTo = to.toLowerCase();
+  return pending.some((context) => context.from.id === to
+    || context.from.name?.toLowerCase() === lowerTo
+    || context.from.id.startsWith(to));
+}
+
 function resolvePendingSender(pending: IntercomContext[], to: string): IntercomContext {
   const exactIdMatches = pending.filter((context) => context.from.id === to);
   if (exactIdMatches.length === 1) {
@@ -101,7 +108,10 @@ export class ReplyTracker {
         // Ordinary inbound messages are turn contexts but not pending asks.
         // Permit an explicit response only when it addresses that exact
         // context; never fall back to an arbitrary destination.
-        if (this.currentTurnContext && !this.currentTurnContext.message.expectsReply && matchesPendingSender(this.currentTurnContext, options.to)) {
+        if (!hasPendingSenderMatch(pending, options.to)
+          && this.currentTurnContext
+          && !this.currentTurnContext.message.expectsReply
+          && matchesPendingSender(this.currentTurnContext, options.to)) {
           return this.currentTurnContext;
         }
         throw error;
