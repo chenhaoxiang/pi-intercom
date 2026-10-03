@@ -672,6 +672,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   let runtimeStarted = false;
   let runtimeGeneration = 0;
   let agentRunning = false;
+  // A wake prompt stays pending until agent_start: Pi marks the run active only after its async
+  // preflight. Pi exposes no prompt completion, and a handled or failed preflight never emits
+  // agent_start, so the reservation expires after a bounded window instead of latching.
+  let idleWakeRequestedAt = 0;
+  const idleWakePending = () => idleWakeRequestedAt > 0 && Date.now() - idleWakeRequestedAt < 10_000;
   const heldInboundMessages: InboundMessageEntry[] = [];
   let heldInboundTimer: NodeJS.Timeout | null = null;
   function dropHeldInboundMessage(messageId: string, receipt: { status: MessageReceiptStatus; detail?: string }): boolean {
@@ -1280,6 +1285,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       : entry.from.name || entry.from.id.slice(0, 8);
     const replyInstruction = replyCommand ? `\n\nTo reply, use the intercom tool: ${replyCommand}` : "";
     const deliveryMetadata = formatInboundDeliveryMetadata(injectedMessage);
+    const trigger = delivery === "trigger" && shouldTriggerInboundMessage(entry, forceTrigger);
     pi.sendMessage(
       {
         customType: "intercom_message",
@@ -1287,10 +1293,14 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         display: true,
         details: deliveredEntry,
       },
-      delivery === "trigger" && shouldTriggerInboundMessage(entry, forceTrigger)
-        ? { triggerTurn: true }
-        : { deliverAs: "steer" }
+      trigger ? undefined : { deliverAs: "steer" }
     );
+    // Pi skips before_agent_start for sendMessage({ triggerTurn: true }) turns (pi#5581),
+    // so wake an idle session with a user prompt that runs the normal prompt lifecycle.
+    if (trigger && !idleWakePending() && getLiveContext(runtimeContext, generation)?.isIdle()) {
+      idleWakeRequestedAt = Date.now();
+      pi.sendUserMessage("New intercom message above.");
+    }
     emitMessageReceipt(injectedMessage.id, "injected");
   }
   function sendIncomingBrokerMessage(entry: InboundMessageEntry, delivery: "trigger" | "steer", generation = runtimeGeneration): void {
@@ -1325,7 +1335,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   function flushHeldInboundMessages(ctx: ExtensionContext, generation: number): void {
     if (!getLiveContext(ctx, generation)) return;
     if (config.busyDelivery === "human-first" && ctx.hasUI) {
-      if (ctx.isIdle() && heldInboundMessages.length > 0) {
+      if (ctx.isIdle() && !idleWakePending() && heldInboundMessages.length > 0) {
         deliverIncomingBrokerMessage(heldInboundMessages.shift()!, ctx, generation);
       }
       if (heldInboundMessages.length === 0) clearHeldInboundTimer();
@@ -1870,6 +1880,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     disposed = false;
     runtimeStarted = true;
     runtimeGeneration += 1;
+    idleWakeRequestedAt = 0;
     outboxRequestIds.clear();
     reconnectAttempt = 0;
     clearReconnectTimer();
@@ -2063,6 +2074,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
   });
   pi.on("agent_start", () => {
+    idleWakeRequestedAt = 0;
     if (!getLiveContext()) {
       return;
     }
