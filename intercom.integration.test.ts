@@ -1960,6 +1960,27 @@ test("intercom tool renders compact call and result rows", async () => {
   assert.match(expandedRoster, /peer-a\n• peer-b/);
 });
 
+test("outgoing tool calls preserve full messages when expanded", async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  await withChildOrchestratorEnv({
+    orchestratorTarget: "orchestrator", runId: "expanded-call-test", agent: "worker", index: "0",
+  }, () => {
+    const harness = createExtensionHarness();
+    piIntercomExtension(harness.pi as never);
+    const message = `  ${"a".repeat(100)}\n\n    中文🧪 tail`;
+    for (const [name, args, title] of [
+      ["intercom", { action: "send", to: "planner", message }, "intercom send → planner"],
+      ["contact_supervisor", { reason: "progress_update", message }, "contact_supervisor progress_update"],
+    ] as const) {
+      const tool = harness.tools.find((candidate) => candidate.name === name)!;
+      assert.ok(tool.renderCall);
+      assert.equal(renderToText(tool.renderCall(args, renderTheme, { expanded: true })), `${title}\n  ${message}`);
+      assert.equal(renderToText(tool.renderCall(args, renderTheme, { expanded: false })), `${title}\n  ${"a".repeat(95)}…`);
+      assert.equal(args.message, message);
+    }
+  });
+});
+
 test("intercom tool result hook marks failed details as errors", async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const harness = createExtensionHarness();
