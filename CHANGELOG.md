@@ -4,9 +4,16 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-10-04
+
+### Highlights
+- An intercom message that wakes an idle session now starts a normal turn, with everything your other extensions add to the prompt. Providers such as pi-claude-bridge no longer fail on that turn or get stuck afterwards.
+- You can see when a message woke a session: the transcript shows a short "New intercom message above." line.
+- Press Ctrl+O to read the full text of messages you send, not just the first line or so.
+
 ### Fixed
+- A message that arrived while a session was idle started a turn without other extensions' `before_agent_start` additions to the prompt. Providers that check the prompt, such as pi-claude-bridge, failed that turn, and the session could stay broken afterwards. The message is now added to the session first, and the session wakes through a normal prompt, so those additions are included. The transcript shows the wake as a short "New intercom message above." line. Sessions already broken by the old behavior need the manual fix described in issue #152. Thanks to [@BGamboa13](https://github.com/BGamboa13) for issue #152 and [@pmontiel-x](https://github.com/pmontiel-x) for the follow-up diagnosis.
 - Pressing Ctrl+O now shows the full message of an outgoing `intercom` or `contact_supervisor` call. Before, long messages stayed cut off at a short preview even when expanded. Thanks to [@summer-tt](https://github.com/summer-tt) for PR #153.
-- A message that arrived while a session was idle started a turn that skipped other extensions' `before_agent_start` hooks, so their prompt additions were missing. Providers that check the prompt, such as pi-claude-bridge, failed that turn and could leave the session broken afterwards. The message is now added to the session, and the session wakes through a normal prompt, so the hooks run. The transcript shows that wake as a short "New intercom message above." prompt. Thanks to [@BGamboa13](https://github.com/BGamboa13) for issue #152 and [@pmontiel-x](https://github.com/pmontiel-x) for the follow-up diagnosis.
 
 ## [0.16.0] - 2026-09-30
 
