@@ -1,5 +1,7 @@
 # Pi Intercom
 
+English | [中文](README.zh-CN.md)
+
 Direct 1:1 messaging between Pi sessions on the same machine. This repository is the maintained `chenhaoxiang/pi-intercom` fork of the upstream intercom extension.
 
 > Fork repository: <https://github.com/chenhaoxiang/pi-intercom>
