@@ -1,6 +1,7 @@
 node_modules/
 *.log
 .DS_Store
+/tmp/
 
 progress.md
 package-lock.json

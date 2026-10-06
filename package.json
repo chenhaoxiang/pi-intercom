@@ -1,7 +1,10 @@
 {
   "name": "pi-intercom",
-  "version": "0.16.0",
+  "version": "0.16.1-fork.1",
   "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/chenhaoxiang/pi-intercom.git" },
+  "homepage": "https://github.com/chenhaoxiang/pi-intercom#readme",
+  "bugs": "https://github.com/chenhaoxiang/pi-intercom/issues",
   "type": "module",
   "main": "index.ts",
   "bin": {
@@ -25,7 +28,10 @@
     "reply-tracker.ts",
     "broker/**/*.ts",
     "ui/**/*.ts",
-    "skills/**/*"
+    "skills/**/*",
+    "README.md",
+    "README.zh-CN.md",
+    "docs/releasing.md"
   ],
   "scripts": {
     "test": "tsx --test handover.test.ts herdr-location.test.ts cross-machine-envelope.test.ts cross-machine-discovery.test.ts cross-machine-transport.test.ts cross-machine-integration.test.ts cli.test.ts broker/cross-machine-provenance.test.ts broker/client.test.ts broker/client-liveness.test.ts broker/extension.test.ts broker/framing.test.ts broker/paths.test.ts broker/runtime-claim.test.ts broker/spawn.test.ts config.test.ts cwd.test.ts format-context.test.ts project-agent.test.ts reply-tracker.test.ts intercom.integration.test.ts human-priority.pi.test.ts test/inline-message.test.ts test/overlay-width.test.ts test/handover-picker.test.ts"
