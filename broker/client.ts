@@ -51,7 +51,7 @@ function toError(error: unknown): Error {
  */
 function getLivenessIntervalMs(): number {
   const raw = Number.parseInt(process.env.PI_INTERCOM_LIVENESS_INTERVAL_MS ?? "", 10);
-  return Number.isFinite(raw) && raw > 0 ? raw : 30_000;
+  return Number.isSafeInteger(raw) && raw > 0 ? raw : 30_000;
 }
 
 function getLivenessTimeoutMs(): number {
@@ -314,7 +314,8 @@ export class IntercomClient extends EventEmitter {
         const scopeId = getIntercomScopeId();
         writeMessage(socket, {
           type: "register",
-          session,
+          // The heartbeat started on registration sends a frame at least this often.
+          session: { ...session, livenessIntervalMs: getLivenessIntervalMs() },
           ...(sessionId ? { sessionId } : {}),
           ...(scopeId ? { scopeId } : {}),
           ...(typeof target === "string" ? {} : { stateId: target.stateId }),
