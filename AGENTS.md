@@ -10,6 +10,7 @@ This is the maintained fork of nicobailon/pi-intercom. Use an isolated worktree;
 
 ## Documentation map
 
+- `docs/maintenance/2026-10-11-installed-acceptance.md`: v0.17.0-fork.1 immutable release download, installed byte readback, RPC smoke and restart boundary.
 - `README.md` / `README.zh-CN.md`: English-first/Chinese installation, operations, configuration and privacy boundaries.
 - `docs/releasing.md`: branch/version contract, repair preservation, per-version releases, asset verification and restart limitations.
 - `CHANGELOG.md`: community and maintained-fork release history.
