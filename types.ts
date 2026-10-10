@@ -1,6 +1,8 @@
 export const EXTENSION_BUS_FEATURE = "extension-bus-v1";
 export const EXACT_SEND_FEATURE = "exact-send-v1";
 export const PENDING_ASKS_FEATURE = "pending-asks-v1";
+/** Broker refused a register because another live process holds the session id. */
+export const SESSION_HELD_ERROR_CODE = "E_SESSION_HELD";
 
 export type DeliveryState = "socket_delivered" | "queued" | "failed" | "unknown";
 
@@ -81,6 +83,8 @@ export interface SessionInfo {
   herdrLocation?: HerdrLocation;
 }
 
+export type SessionHolder = Pick<SessionInfo, "pid" | "cwd" | "name">;
+
 export interface CrossMachineOrigin {
   name: string;
   sessionId: string;
@@ -156,6 +160,10 @@ export type SessionRegistration = Omit<SessionInfo, "id" | "endpointEpoch" | "pe
   extensions?: ExtensionCapability[];
   /** Broker-only join hint; never returned in the public roster. */
   herdrSessionPath?: string;
+  /** The client sends `receiver_received` for every message it is handed, so the broker may wait for it before reporting delivery. */
+  acknowledgesReceipts?: boolean;
+  /** The client sends a frame at least this often, so the broker may drop it after several silent intervals. */
+  livenessIntervalMs?: number;
 };
 
 export type ClientMessage =
@@ -193,7 +201,7 @@ export type BrokerMessage =
   | { type: "presence_update"; session: SessionInfo }
   | { type: "session_joined"; session: SessionInfo }
   | { type: "session_left"; sessionId: string }
-  | { type: "error"; error: string }
+  | { type: "error"; error: string; code?: string; holder?: SessionHolder }
   | ({ type: "delivered"; messageId: string } & DeliveryDetails)
   | ({ type: "delivery_failed"; messageId: string; reason: string } & DeliveryDetails)
   | { type: "message_receipt"; from: SessionInfo; receipt: MessageReceipt }

@@ -4,6 +4,31 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.17.0-fork.1] - 2026-10-11
+
+- Integrate community 0.17.0 pool isolation, receiver-confirmed delivery, liveness cleanup and persistent reconnect.
+- Retain durable ask/reply, scoped routing, dedupe, human-first delivery and restart-stable routing.
+- Replayed durable asks without a surviving receipt report unknown, never a false delivered result.
+
+## [0.17.0] - 2026-10-10
+
+### Highlights
+- Move a running session into its own intercom pool with `/intercom-pool <name>`, so it only talks to sessions in that pool.
+- A send now reports success only after the other session confirms it got the message. Messages to a session that crashed are no longer reported as delivered.
+- Sessions that crash or stop responding drop off the session list on their own, and messages to them wait until they reconnect.
+- After the broker goes away, sessions keep trying to reconnect until it comes back, instead of staying offline.
+- If you use a shared `stableId` in `config.json`, switch to a separate `PI_INTERCOM_STABLE_ID` per session, then close all Pi sessions once after upgrading.
+
+### Added
+- `/intercom-pool <name>` moves a running session into a separate intercom pool, so it only talks to sessions in that pool. `/intercom-pool default` moves it back. The current pool shows in `status` and in the `/intercom` overlay. Thanks to [@Pl8tinium](https://github.com/Pl8tinium) for issue #156.
+
+### Fixed
+- If a background reconnect to the broker failed, pi-intercom never tried again. The session stayed offline until you next used the `intercom` tool or overlay. It now keeps retrying, waiting 1s, 2s, 5s, 10s, and then 30s between tries, until the broker is reachable (#159).
+- A send could report `socket_delivered` for a message the other session never got, because that session's process had died while its connection still looked open. The broker now waits up to 5 seconds for the receiving Pi session to confirm the message. Without that confirmation, the send reports an unconfirmed outcome you can retry, and an `ask` to an unresponsive session fails right away instead of waiting for the ask timeout. If the session was only slow, its later reply still arrives as an ordinary message. A send that reaches a session while it reloads can also report unconfirmed. The CLI and other non-Pi clients work as before. Thanks to [@catlain](https://github.com/catlain) for issue #157.
+- Two running Pi sessions with the same intercom session ID no longer take the ID from each other every second, with messages going to whichever one registered last. The first running session keeps the ID. The second gets `E_SESSION_HELD`, stops reconnecting, and shows which process and directory hold the ID; `/reload` tries again. If the session holding an ID has exited, a new session can take it right away. **Behavior change:** a machine-wide `stableId` in `config.json` now lets only one session at a time use intercom, so set a separate `PI_INTERCOM_STABLE_ID` for each session instead. This takes effect once the broker restarts, so close all Pi sessions once after upgrading. Thanks to [@Ribelio](https://github.com/Ribelio) for #155.
+- A session whose process died without closing its connection stayed in the session list, and messages kept going to it. The broker now drops a session that has been silent for three heartbeat intervals (90 seconds by default). Messages to it wait and are delivered when it reconnects. Thanks to [@catlain](https://github.com/catlain) for issue #157.
+- When an intercom message and a subagent notice reached an idle session at the same time, both extensions tried to wake it, and the second wake failed with `Agent is already processing a prompt`. pi-intercom and pi-subagents now share one wake per session, so the second message is added to the turn the first one starts. This needs the matching pi-subagents release.
+
 ## [0.16.1-fork.1] - 2026-10-06
 
 - Merge community 0.16.1 idle wakeup and expanded outgoing-message fixes without dropping our durable ask/reply, message receipts, human-first, cancellation, dedupe, or restart-stable routing.

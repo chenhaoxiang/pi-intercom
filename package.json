@@ -1,6 +1,6 @@
 {
   "name": "pi-intercom",
-  "version": "0.16.1-fork.1",
+  "version": "0.17.0-fork.1",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/chenhaoxiang/pi-intercom.git" },
   "homepage": "https://github.com/chenhaoxiang/pi-intercom#readme",
@@ -24,6 +24,7 @@
     "format-context.ts",
     "handover.ts",
     "herdr-location.ts",
+    "idle-wake.ts",
     "project-agent.ts",
     "reply-tracker.ts",
     "broker/**/*.ts",

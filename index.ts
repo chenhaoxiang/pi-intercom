@@ -3,13 +3,13 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { randomUUID } from "crypto";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
-import { IntercomClient, type SendResult } from "./broker/client.ts";
+import { IntercomClient, IntercomSessionHeldError, type SendResult } from "./broker/client.ts";
 import { spawnBrokerIfNeeded } from "./broker/spawn.ts";
 import { SessionListOverlay, type SessionListSelection } from "./ui/session-list.ts";
 import { HandoverPicker, type HandoverPickerResult, type RemoteSessionLister } from "./ui/handover-picker.ts";
 import { ComposeOverlay, type ComposeResult } from "./ui/compose.ts";
 import { InlineMessageComponent } from "./ui/inline-message.ts";
-import { getAskTimeoutMs, loadConfig, type IntercomConfig } from "./config.ts";
+import { getAskTimeoutMs, getIntercomScopeId, loadConfig, setIntercomScopeId, type IntercomConfig } from "./config.ts";
 import { EXTENSION_BUS_FEATURE } from "./types.ts";
 import type { Attachment, BrokerMessage, Message, MessageControl, MessageReceiptStatus, PendingAsk, SessionInfo, SessionRegistration } from "./types.ts";
 import {
@@ -39,6 +39,7 @@ import { relaySenderName } from "./cross-machine-envelope.ts";
 import { runCommand, sendCrossMachine } from "./cross-machine-transport.ts";
 import { listMachineAgents, listSavedMachines, parseCrossMachineTarget } from "./cross-machine-discovery.ts";
 import { formatHandoverMessage, generateHandoverBody, readGitState } from "./handover.ts";
+import { isIdleWakePending, releaseIdleWake, reserveIdleWake } from "./idle-wake.ts";
 
 const INTERCOM_TOOL_NAME = "intercom";
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
@@ -157,6 +158,14 @@ export function explicitCrossMachineSendRestriction(options: {
     return "Cross-machine send only supports a new text message; attachments, reply relationships, supersede, and retry are not supported.";
   }
   return undefined;
+}
+
+// An unconfirmed outcome must not read as a failure: the receiver may still have the message.
+function undeliveredText(target: string, result: SendResult, kind: "Message" | "Reply" | "Response" = "Message"): string {
+  const reason = result.reason ?? "Session may not exist or has disconnected.";
+  return result.outcomeKnown
+    ? `${kind} to "${target}" was not delivered: ${reason}`
+    : `Delivery to "${target}" could not be confirmed: ${reason}. The message may still arrive, so sending it again could duplicate it.`;
 }
 
 function deliveryDetails(result: SendResult): Record<string, unknown> {
@@ -667,16 +676,14 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   let reconnectPromiseGeneration: number | null = null;
   let startupConnectTimer: NodeJS.Timeout | null = null;
   let reconnectAttempt = 0;
+  // Retrying a held session id cannot succeed until its holder exits, so background reconnects stop
+  // until the next session start (/reload) or a successful manual connect.
+  let sessionHeldBlocked = false;
   let shuttingDown = false;
   let disposed = true;
   let runtimeStarted = false;
   let runtimeGeneration = 0;
   let agentRunning = false;
-  // A wake prompt stays pending until agent_start: Pi marks the run active only after its async
-  // preflight. Pi exposes no prompt completion, and a handled or failed preflight never emits
-  // agent_start, so the reservation expires after a bounded window instead of latching.
-  let idleWakeRequestedAt = 0;
-  const idleWakePending = () => idleWakeRequestedAt > 0 && Date.now() - idleWakeRequestedAt < 10_000;
   const heldInboundMessages: InboundMessageEntry[] = [];
   let heldInboundTimer: NodeJS.Timeout | null = null;
   function dropHeldInboundMessage(messageId: string, receipt: { status: MessageReceiptStatus; detail?: string }): boolean {
@@ -893,12 +900,12 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       // The UI can disappear during session shutdown/reload while async overlay work is settling.
     }
   }
-  function notifyAliasCommand(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error", generation = runtimeGeneration): void {
+  function notifyCommand(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error", generation = runtimeGeneration): void {
     const liveContext = getLiveContext(ctx, generation);
     if (!liveContext) return;
     if (!liveContext.hasUI) {
       // Command handlers return void and print mode supplies a no-op UI. Keep
-      // alias guidance visible without injecting a synthetic Pi message.
+      // command output visible without injecting a synthetic Pi message.
       console.error(message);
       return;
     }
@@ -1019,6 +1026,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       ...(tmuxPane ? { tmuxPane } : {}),
       ...(herdrPaneId ? { herdrPaneId } : {}),
       ...(herdrSessionPath ? { herdrSessionPath } : {}),
+      // handleIncomingMessage confirms every message it accepts; one that lands mid-reload goes unconfirmed.
+      acknowledgesReceipts: true,
       ...(localExtensions.size > 0
         ? {
             extensions: currentExtensionCapabilities(),
@@ -1340,9 +1349,10 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     );
     // Pi skips before_agent_start for sendMessage({ triggerTurn: true }) turns (pi#5581),
     // so wake an idle session with a user prompt that runs the normal prompt lifecycle.
-    if (trigger && !idleWakePending() && getLiveContext(runtimeContext, generation)?.isIdle()) {
-      idleWakeRequestedAt = Date.now();
-      pi.sendUserMessage("New intercom message above.");
+    const wakeContext = trigger ? getLiveContext(runtimeContext, generation) : undefined;
+    if (wakeContext?.isIdle() && !isIdleWakePending(wakeContext.sessionManager)) {
+      reserveIdleWake(wakeContext.sessionManager);
+      pi.sendUserMessage("New intercom message above.", { deliverAs: "steer" });
     }
     emitMessageReceipt(injectedMessage.id, "injected");
   }
@@ -1378,7 +1388,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   function flushHeldInboundMessages(ctx: ExtensionContext, generation: number): void {
     if (!getLiveContext(ctx, generation)) return;
     if (config.busyDelivery === "human-first" && ctx.hasUI) {
-      if (ctx.isIdle() && !idleWakePending() && heldInboundMessages.length > 0) {
+      if (ctx.isIdle() && !isIdleWakePending(ctx.sessionManager) && heldInboundMessages.length > 0) {
         deliverIncomingBrokerMessage(heldInboundMessages.shift()!, ctx, generation);
       }
       if (heldInboundMessages.length === 0) clearHeldInboundTimer();
@@ -1534,11 +1544,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         return;
       }
       rejectReplyWaiter(new Error(`Disconnected while waiting for reply: ${error.message}`, { cause: error }));
-      for (const [namespace, extension] of localExtensions) {
-        extension.owner = undefined;
-        emitLocalExtensionEvent(namespace, { type: "connection", connected: false, supported: false });
-        emitLocalExtensionEvent(namespace, { type: "owner" });
-      }
+      markLocalExtensionsDisconnected();
       client = null;
       if (!shuttingDown && !disposed) {
         clearReconnectTimer();
@@ -1549,8 +1555,15 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       // Keep broker/socket noise out of the TUI. Reconnect logic runs from the disconnect path.
     });
   }
+  function markLocalExtensionsDisconnected(): void {
+    for (const [namespace, extension] of localExtensions) {
+      extension.owner = undefined;
+      emitLocalExtensionEvent(namespace, { type: "connection", connected: false, supported: false });
+      emitLocalExtensionEvent(namespace, { type: "owner" });
+    }
+  }
   function scheduleReconnect(): void {
-    if (disposed || shuttingDown || reconnectTimer || reconnectPromise || !getLiveContext()) {
+    if (disposed || shuttingDown || sessionHeldBlocked || reconnectTimer || reconnectPromise || !getLiveContext()) {
       return;
     }
     const scheduledGeneration = runtimeGeneration;
@@ -1564,6 +1577,18 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         // ensureConnected("background") already queued the next retry.
       });
     }, getReconnectDelayMs());
+  }
+  function reportSessionHeld(ctx: ExtensionContext, generation: number, error: IntercomSessionHeldError): void {
+    if (sessionHeldBlocked || !getLiveContext(ctx, generation)) return;
+    sessionHeldBlocked = true;
+    const message = `Intercom is offline: session id ${currentIntercomSessionId} is held by process ${error.holder.pid} in ${error.holder.cwd}. Close that session and run /reload, or give this session its own PI_INTERCOM_STABLE_ID.`;
+    notifyIfLive(ctx, message, "warning", generation);
+    pi.appendEntry("intercom_session_held", {
+      sessionId: currentIntercomSessionId,
+      holder: error.holder,
+      error: error.message,
+      timestamp: Date.now(),
+    });
   }
   async function ensureConnected(reason: "startup" | "background" | "tool" | "overlay"): Promise<IntercomClient> {
     if (!config.enabled) {
@@ -1588,6 +1613,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       const nextClient = new IntercomClient();
       client = nextClient;
       attachClientHandlers(nextClient);
+      let retryAfterFailure = false;
       try {
         await spawnBrokerIfNeeded(config.brokerCommand, config.brokerArgs);
         await nextClient.connect(buildRegistration(), currentIntercomSessionId ?? currentSessionId);
@@ -1597,19 +1623,25 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         }
         client = nextClient;
         reconnectAttempt = 0;
+        sessionHeldBlocked = false;
         return nextClient;
       } catch (error) {
         if (client === nextClient) {
           client = null;
         }
-        if (reason === "background" && getLiveContext(contextAtStart, generationAtStart)) {
-          scheduleReconnect();
+        if (error instanceof IntercomSessionHeldError) {
+          reportSessionHeld(contextAtStart, generationAtStart, error);
         }
+        retryAfterFailure = reason === "background";
         throw toError(error);
       } finally {
         if (reconnectPromise === nextReconnectPromise) {
           reconnectPromise = null;
           reconnectPromiseGeneration = null;
+        }
+        // scheduleReconnect() skips while reconnectPromise is set, so queue the retry only after clearing it.
+        if (retryAfterFailure && getLiveContext(contextAtStart, generationAtStart)) {
+          scheduleReconnect();
         }
       }
     })();
@@ -1829,9 +1861,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         retryOf,
       });
       if (!result.delivered) {
-        const errorText = result.reason ?? "Session may not exist or has disconnected.";
         return {
-          content: [{ type: "text", text: `Message to "${targetDisplay}" was not delivered: ${errorText}` }],
+          content: [{ type: "text", text: undeliveredText(targetDisplay, result) }],
           details: deliveryDetails(result),
         };
       }
@@ -1923,9 +1954,9 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     disposed = false;
     runtimeStarted = true;
     runtimeGeneration += 1;
-    idleWakeRequestedAt = 0;
     outboxRequestIds.clear();
     reconnectAttempt = 0;
+    sessionHeldBlocked = false;
     clearReconnectTimer();
     clearStartupConnectTimer();
     clearNamePollTimer();
@@ -1966,7 +1997,6 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         if (!getLiveContext(ctx, startupGeneration)) {
           return;
         }
-        client = null;
         scheduleReconnect();
       });
     }, 0);
@@ -2116,8 +2146,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       if (heldInboundMessages.length === 0) clearHeldInboundTimer();
     }
   });
-  pi.on("agent_start", () => {
-    idleWakeRequestedAt = 0;
+  pi.on("agent_start", (_event, ctx) => {
+    releaseIdleWake(ctx.sessionManager);
     if (!getLiveContext()) {
       return;
     }
@@ -2314,9 +2344,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
               text: formatChildOrchestratorMessage("update", metadata, message),
             });
             if (!result.delivered) {
-              const errorText = result.reason ?? "Session may not exist or has disconnected.";
               return {
-                content: [{ type: "text", text: `Message to "${metadata.orchestratorTarget}" was not delivered: ${errorText}` }],
+                content: [{ type: "text", text: undeliveredText(metadata.orchestratorTarget, result) }],
                 details: deliveryDetails(result),
               };
             }
@@ -2375,8 +2404,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           });
           deliveryState = sendResult.delivered ? "socket_delivered" : "delivery_failed";
           if (!sendResult.delivered) {
-            const errorText = sendResult.reason ?? "Session may not exist or has disconnected.";
-            rejectReplyWaiter(new Error(`Message to "${metadata.orchestratorTarget}" was not delivered: ${errorText}`));
+            const errorText = undeliveredText(metadata.orchestratorTarget, sendResult);
+            rejectReplyWaiter(new Error(errorText));
             if (replyPromise) {
               try {
                 await replyPromise;
@@ -2385,7 +2414,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
               }
             }
             return {
-              content: [{ type: "text", text: `Message to "${metadata.orchestratorTarget}" was not delivered: ${errorText}` }],
+              content: [{ type: "text", text: errorText }],
               details: { error: true },
             };
           }
@@ -2786,8 +2815,8 @@ Usage:
 
             deliveryState = sendResult.delivery;
             if (!sendResult.delivered) {
-              const errorText = sendResult.reason ?? "Session may not exist or has disconnected.";
-              rejectReplyWaiter(new Error(`Message to "${targetDisplay}" was not delivered: ${errorText}`));
+              const errorText = undeliveredText(targetDisplay, sendResult);
+              rejectReplyWaiter(new Error(errorText));
               if (replyPromise) {
                 try {
                   await replyPromise;
@@ -2796,7 +2825,7 @@ Usage:
                 }
               }
               return {
-                content: [{ type: "text", text: `Message to "${targetDisplay}" was not delivered: ${errorText}` }],
+                content: [{ type: "text", text: errorText }],
                 details: { error: true, ...deliveryDetails(sendResult) },
               };
             }
@@ -2860,12 +2889,11 @@ Usage:
               ...(pendingReplyTo ? { replyTo: pendingReplyTo } : {}),
             });
             if (!result.delivered) {
-              const errorText = result.reason ?? "Session may not exist or has disconnected.";
-              if (pendingReplyTo && result.reason === "Session not found") {
-                dismissIncomingAsk(pendingReplyTo);
+              if (result.reason === "Session not found") {
+                dismissIncomingAsk(pendingReplyTo ?? target.message.id);
               }
               return {
-                content: [{ type: "text", text: `${pendingReplyTo ? "Reply" : "Response"} to "${target.from.name || target.from.id}" was not delivered: ${errorText}` }],
+                content: [{ type: "text", text: undeliveredText(target.from.name || target.from.id, result, pendingReplyTo ? "Reply" : "Response") }],
                 details: deliveryDetails(result),
               };
             }
@@ -2933,10 +2961,11 @@ Usage:
           try {
             const mySessionId = connectedClient.sessionId;
             const sessions = await connectedClient.listSessions();
+            const pool = getIntercomScopeId();
             return {
               content: [{
                 type: "text",
-                text: `**Intercom Status:**\nConnected: Yes\nSession ID: ${mySessionId}\nActive sessions: ${sessions.length}`,
+                text: `**Intercom status:**\nConnected: Yes\nSession ID: ${mySessionId}${pool ? `\nPool: ${pool}` : ""}\nActive sessions: ${sessions.length}`,
               }],
               details: {},
             };
@@ -3041,7 +3070,7 @@ Usage:
     if (opensAliasInput) {
       if (!liveContext.hasUI) {
         const currentAlias = pi.getSessionName()?.trim();
-        notifyAliasCommand(
+        notifyCommand(
           liveContext,
           alias ? "The alias menu requires an interactive UI; use /alias <name>." : currentAlias ? `Session alias: ${currentAlias}` : "No session alias set. Use /alias <name>.",
           alias ? "warning" : "info",
@@ -3058,13 +3087,13 @@ Usage:
           currentAlias ? `Current alias: ${currentAlias}` : "Enter an alias",
         );
       } catch (error) {
-        notifyAliasCommand(liveContext, `Unable to set session alias: ${getErrorMessage(error)}`, "error", commandGeneration);
+        notifyCommand(liveContext, `Unable to set session alias: ${getErrorMessage(error)}`, "error", commandGeneration);
         return;
       }
       if (entered === undefined) return;
       alias = entered.trim();
       if (!alias) {
-        notifyAliasCommand(liveContext, "Session alias cannot be empty.", "warning", commandGeneration);
+        notifyCommand(liveContext, "Session alias cannot be empty.", "warning", commandGeneration);
         return;
       }
     }
@@ -3073,7 +3102,7 @@ Usage:
     try {
       pi.setSessionName(alias);
     } catch (error) {
-      notifyAliasCommand(liveContext, `Unable to set session alias: ${getErrorMessage(error)}`, "error", commandGeneration);
+      notifyCommand(liveContext, `Unable to set session alias: ${getErrorMessage(error)}`, "error", commandGeneration);
       return;
     }
 
@@ -3081,7 +3110,50 @@ Usage:
     // an ExtensionAPI event. Push the new identity directly so broker peers
     // see the alias without waiting for the idle name poll.
     syncPresenceIdentity(liveContext.sessionManager.getSessionId());
-    notifyAliasCommand(liveContext, `Session alias set: ${alias}`, "info", commandGeneration);
+    notifyCommand(liveContext, `Session alias set: ${alias}`, "info", commandGeneration);
+  }
+
+  async function runIntercomPoolCommand(args: string, ctx: ExtensionContext): Promise<void> {
+    const commandGeneration = runtimeGeneration;
+    const liveContext = getLiveContext(ctx, commandGeneration);
+    if (!liveContext) return;
+    const requested = args.trim();
+    if (!requested) {
+      notifyCommand(liveContext, `Intercom pool: ${getIntercomScopeId() ?? "default"}`, "info", commandGeneration);
+      return;
+    }
+    const nextPool = requested === "default" ? undefined : requested;
+    // A connect already in flight registered with the old pool; let it settle first.
+    await reconnectPromise?.catch(() => undefined);
+    if (!getLiveContext(liveContext, commandGeneration)) return;
+    if (nextPool === getIntercomScopeId()) {
+      notifyCommand(liveContext, `Already in intercom pool: ${requested}`, "info", commandGeneration);
+      return;
+    }
+    if (replyWaiter) {
+      // The reply is routed inside the current pool and would be lost after the switch.
+      notifyCommand(liveContext, `Cannot switch intercom pool while waiting for a reply from "${replyWaiter.from}". Wait for the reply or cancel the ask first.`, "warning", commandGeneration);
+      return;
+    }
+
+    setIntercomScopeId(nextPool);
+    const previousClient = client;
+    client = null;
+    clearReconnectTimer();
+    markLocalExtensionsDisconnected();
+    await previousClient?.disconnect().catch(() => undefined);
+    if (!getLiveContext(liveContext, commandGeneration)) return;
+    try {
+      await ensureConnected("background");
+    } catch (error) {
+      if (getLiveContext(liveContext, commandGeneration)) {
+        // A tool connect that started during the switch may own this failed attempt, and it does not retry.
+        scheduleReconnect();
+      }
+      notifyCommand(liveContext, `Switched to intercom pool ${requested}, but intercom is unavailable: ${getErrorMessage(error)}. Retrying in the background.`, "warning", commandGeneration);
+      return;
+    }
+    notifyCommand(liveContext, `Joined intercom pool: ${requested}`, "info", commandGeneration);
   }
 
   async function runHandoverCommand(args: string, ctx: ExtensionContext): Promise<void> {
@@ -3089,7 +3161,7 @@ Usage:
     const liveContext = getLiveContext(ctx, commandGeneration);
     if (!liveContext) return;
     if (!liveContext.hasUI || (liveContext as ExtensionContext & { mode?: string }).mode !== "tui") {
-      notifyAliasCommand(liveContext, "/handover requires the interactive terminal UI; use the intercom tool's handover action instead.", "error", commandGeneration);
+      notifyCommand(liveContext, "/handover requires the interactive terminal UI; use the intercom tool's handover action instead.", "error", commandGeneration);
       return;
     }
     const input = args.trim();
@@ -3247,7 +3319,7 @@ Usage:
     }
 
     const selection = await ctx.ui.custom<SessionListSelection | undefined>(
-      (_tui, theme, keybindings, done) => new SessionListOverlay(theme, keybindings, currentSession, sessions, done),
+      (_tui, theme, keybindings, done) => new SessionListOverlay(theme, keybindings, currentSession, sessions, done, getIntercomScopeId()),
       { overlay: true, overlayOptions: { width: 88 } }
     ).catch(() => undefined);
 
@@ -3292,6 +3364,11 @@ Usage:
   pi.registerCommand("intercom-id", {
     description: "Insert a stable pi-intercom handoff snippet for this session into the editor",
     handler: async (_args, ctx) => insertIntercomId(ctx),
+  });
+
+  pi.registerCommand("intercom-pool", {
+    description: "Show or switch this session's intercom pool (usage: /intercom-pool, /intercom-pool <name>, or /intercom-pool default)",
+    handler: async (args, ctx) => runIntercomPoolCommand(args, ctx),
   });
 
   pi.registerCommand("alias", {
