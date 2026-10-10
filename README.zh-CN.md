@@ -10,7 +10,7 @@
 
 ## 发布版本与分支约定
 
-当前维护版本为 **0.16.1-fork.1**，基于社区 **0.16.1**。fork 版本统一使用 `<社区版本>-fork.<修订号>`，本地修订不冒充社区新版本。
+当前维护版本为 **0.17.0-fork.1**，基于社区 **0.17.0**。fork 版本统一使用 `<社区版本>-fork.<修订号>`，本地修订不冒充社区新版本。
 
 - `main`：我们的维护、整合与发布主线，保留 fork 修复。
 - `upstream-main`：仅镜像社区 `main`，不加入 fork 提交，也不作为安装来源。
@@ -19,7 +19,7 @@
 固定版本安装：
 
 ```bash
-pi install git:github.com/chenhaoxiang/pi-intercom@v0.16.1-fork.1
+pi install git:github.com/chenhaoxiang/pi-intercom@v0.17.0-fork.1
 ```
 
 [GitHub Releases](https://github.com/chenhaoxiang/pi-intercom/releases) 提供可安装的包、来源清单和 `SHA256SUMS` 校验文件；这不是向上游作者的 npm 命名空间发布。发布及制品安装流程见[维护说明](docs/releasing.md)。
@@ -68,13 +68,13 @@ intercom({ action: "handover", to: "worker", message: "继续当前计划，并�
 
 本 fork 保留原有 intercom 体验，并为长期运行的本地 Pi 会话补充可靠性边界：
 
-- 社区 0.16.1 修复：空闲会话通过正常提示生命周期唤醒，Ctrl+O 可展开完整的已发送消息；
-- broker 重启和 Pi reload 后仍可恢复的 `ask` / `reply` 路由；
+- 社区 0.17.0 修复：会话池隔离、接收方确认投递、失联会话清理、broker 重连重试和共享空闲唤醒；
+- broker 重启和 Pi reload 后仍可恢复的 `ask` / `reply` 路由；发送方丢失原投递回执后，使用原消息 ID 重放仍会显示“结果未确认”，重试必须使用新消息 ID；
 - 明确的消息 ID、发送序号、时间戳、投递状态和回复提示；
 - 有界去重：同一消息在一个接收会话中最多注入一次；
 - 显式取消和同发送方 supersede，禁止不透明的自动重试；
 - 通过 `PI_INTERCOM_SCOPE_ID` 使用可选路由域，隔离 scoped 与 unscoped 会话；
-- 使用 `stableId` 或 `PI_INTERCOM_STABLE_ID` 保持重启后的地址稳定；
+- 使用 `stableId` 或 `PI_INTERCOM_STABLE_ID` 保持重启后的地址稳定；从 0.17.0 起，每个活跃会话必须有独立的稳定 ID；旧配置若共用一个 `stableId`，请为各会话设置独立的 `PI_INTERCOM_STABLE_ID`，升级后待任务结束再关闭全部 Pi 会话一次；
 - liveness 心跳，以及 broker 消失后的自动重连；
 - 通过 `busyDelivery: "steer"` 或 `"human-first"` 控制消息如何进入忙碌的交互会话；
 - 与 pi-subagents 桥接：只有携带桥接元数据的委派子会话才会获得 `contact_supervisor`。
@@ -117,7 +117,7 @@ broker 首次使用时自动启动，空闲一段时间后退出，并受启动�
 
 - `inboundTrigger`：broker 消息触发策略，可选 `always`、`replies`、`never`；
 - `busyDelivery`：`steer` 立即交给当前提示，或 `human-first` 等待安全的 turn 边界；
-- `stableId`：可选的重启稳定会话身份；
+- `stableId`：可选的重启稳定会话身份；每个活跃会话使用独立值；从 0.16.x 升级且此前共用该值时，待任务结束再关闭全部 Pi 会话一次；
 - `confirmSend`：发送前是否要求 UI 确认；
 - `status`：在 Pi 生命周期状态后追加自定义状态，不覆盖原状态。
 
