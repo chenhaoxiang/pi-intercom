@@ -10,7 +10,7 @@ Direct 1:1 messaging between Pi sessions on the same machine. This repository is
 
 ## Releases and branch policy
 
-The maintained release is **0.16.1-fork.1**, based on community **0.16.1**. Fork releases use `<community-version>-fork.<revision>`; the fork revision increases without pretending to be a new upstream release.
+The maintained release is **0.17.0-fork.1**, based on community **0.17.0**. Fork releases use `<community-version>-fork.<revision>`; the fork revision increases without pretending to be a new upstream release.
 
 - `main`: our maintained integration and release branch, including fork fixes.
 - `upstream-main`: an exact mirror of the community's `main`, with no fork commits. Never install from this branch.
@@ -19,7 +19,7 @@ The maintained release is **0.16.1-fork.1**, based on community **0.16.1**. Fork
 Install a reproducible release:
 
 ```bash
-pi install git:github.com/chenhaoxiang/pi-intercom@v0.16.1-fork.1
+pi install git:github.com/chenhaoxiang/pi-intercom@v0.17.0-fork.1
 ```
 
 [GitHub Releases](https://github.com/chenhaoxiang/pi-intercom/releases) include the installable package tarball, a provenance manifest, and `SHA256SUMS`. These GitHub releases are not npm publications under the upstream author's namespace. See [release maintenance](docs/releasing.md) for asset installation and future releases.
@@ -68,13 +68,13 @@ intercom({ action: "handover", to: "worker", message: "Continue from the current
 
 The fork keeps the original intercom UX and adds reliability boundaries needed for long-running local Pi sessions:
 
-- community 0.16.1 fixes: idle-session wakeups follow the normal prompt lifecycle, and Ctrl+O expands complete outgoing messages;
-- durable `ask` / `reply` routing across broker restarts and Pi reloads;
+- community 0.17.0 fixes: pool isolation, receiver-confirmed delivery, liveness cleanup, reconnect retries and shared idle wakes;
+- durable `ask` / `reply` routing across broker restarts and Pi reloads; if a sender loses the original delivery receipt, a same-ID replay remains an unconfirmed outcome and a retry must use a new message ID;
 - explicit message IDs, sender sequences, timestamps, delivery states, and reply hints;
 - bounded duplicate delivery: a message is injected at most once per receiving session;
 - explicit cancellation and same-sender supersede operations instead of unsafe automatic retries;
 - optional routing scopes with `PI_INTERCOM_SCOPE_ID`, so scoped and unscoped sessions cannot cross the boundary;
-- restart-stable addressing with `stableId` or `PI_INTERCOM_STABLE_ID`;
+- restart-stable addressing with `stableId` or `PI_INTERCOM_STABLE_ID`; since 0.17.0, each live session needs a distinct stable ID—if older config shared one `stableId`, set a per-session `PI_INTERCOM_STABLE_ID` and close all Pi sessions once after upgrading;
 - liveness heartbeats and automatic reconnect when a broker disappears;
 - `busyDelivery: "steer"` or `"human-first"` for choosing how peer messages enter a busy interactive session;
 - a Pi-subagents bridge that exposes `contact_supervisor` only to delegated children carrying the bridge metadata.
@@ -117,7 +117,7 @@ Useful settings include:
 
 - `inboundTrigger`: `always`, `replies`, or `never` for broker-delivered message turns;
 - `busyDelivery`: `steer` for prompt delivery, or `human-first` to wait for a safe turn boundary;
-- `stableId`: optional restart-stable session identity;
+- `stableId`: optional restart-stable session identity; use a distinct value per live session; after upgrading from 0.16.x, close all Pi sessions once if they previously shared one value;
 - `confirmSend`: require UI confirmation for outbox requests;
 - `status`: append a custom status suffix without replacing Pi's lifecycle status.
 

@@ -22,7 +22,7 @@ Applies only to chenhaoxiang/pi-intercom. The community project remains [nicobai
 
 ## Baseline for this release
 
-Version **0.16.1-fork.1** merges community main `a5fad4df2a9fe4909bf4d9b06263c8316976b57d` into the maintained fork. Both existing reliability repair tips (`5877c30`, `a507c75`) remain ancestors. The upstream wakeup and Ctrl+O fixes are applied on top of durable routing, receipts, dedupe, human-first delivery and scope isolation.
+Version **0.17.0-fork.1** merges community main `14731a4873b500e19d000bf131142e430e4b7928` into the maintained fork. Existing fork reliability repairs `5877c30` and `a507c75` remain ancestors. The upstream pool isolation, receiver-confirmed delivery, liveness cleanup and reconnect changes are applied on top of durable routing, scoped pending-ask protection, dedupe, human-first delivery and restart-stable routing.
 
 ## Publish every version
 
@@ -40,6 +40,8 @@ Version **0.16.1-fork.1** merges community main `a5fad4df2a9fe4909bf4d9b06263c83
 Prefer the pinned git command in README. For offline/artifact installs, download the three release assets into a temporary directory, verify the checksums, then extract the package into a permanent user-owned package directory and run `pi install /absolute/path/to/package`. Do not leave an active install under a temporary release directory. Restart Pi or use `/reload` after installation; disk changes do not hot-reload existing sessions.
 
 Keep the previous release/source available for rollback. Do not terminate the shared live broker or unrelated sessions as part of installation; existing processes may keep loaded modules until their own reload/restart.
+
+Community 0.17.0 allows only one live session per stable ID within a scope. If the old global config shared one `stableId`, migrate to distinct per-session `PI_INTERCOM_STABLE_ID` values and let active work finish before closing all Pi sessions once. Durable ask/reply routes survive broker restart, but a same-ID replay without its original delivery receipt reports an unconfirmed outcome; explicit retries use a new message ID.
 
 ## 中文摘要
 
