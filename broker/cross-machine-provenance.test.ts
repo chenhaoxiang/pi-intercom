@@ -50,6 +50,14 @@ test("protocol validates the complete SSH relay provenance discriminator and ori
   }), true);
 });
 
+test("wake is a validated authored field in replay identity", () => {
+  const message = messageWith(provenance) as Message;
+  for (const wake of [true, false, undefined]) assert.equal(isMessage({ ...message, wake }), true);
+  for (const wake of [null, 0, 1, "false", {}]) assert.equal(isMessage({ ...message, wake }), false);
+  const fingerprints = [undefined, false, true].map(wake => messageDeliveryFingerprint({ ...message, wake }, "receiver-session"));
+  assert.equal(new Set(fingerprints).size, 3, "same ID cannot change the wake semantics under replay");
+});
+
 test("broker replay fingerprints distinguish every asserted origin field", () => {
   const message = messageWith(provenance) as Message;
   const original = messageDeliveryFingerprint(message, "receiver-session");

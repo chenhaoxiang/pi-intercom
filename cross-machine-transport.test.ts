@@ -56,6 +56,23 @@ test("discovers only the selected machine and sends hostile message text only on
   assert.equal(calls.filter((call) => call.command === "herdr").every((call) => call.timeoutMs === DISCOVERY_TIMEOUT_MS), true);
 });
 
+test("explicit wake uses relay v2 and never silently downgrades to a legacy acknowledgment", async () => {
+  for (const wake of [true, false]) {
+    const inputs: any[] = [];
+    const run: CommandRunner = async (command, args, stdin) => {
+      const found = discoveryResult(command, args); if (found) return found;
+      inputs.push(JSON.parse(stdin!));
+      return { code: 0, stdout: JSON.stringify({ ok: true, version: 2 }), stderr: "" };
+    };
+    await sendCrossMachine("reviewer@workstation", "handoff/status", origin, { run, herdrBin: "herdr", wake });
+    assert.equal(inputs[0].version, 2); assert.equal(inputs[0].wake, wake);
+  }
+  let sends = 0;
+  const oldRun: CommandRunner = async (command, args) => discoveryResult(command, args) ?? (sends++, { code: 0, stdout: JSON.stringify({ ok: true, version: 1 }), stderr: "" });
+  await assert.rejects(sendCrossMachine("reviewer@workstation", "task", origin, { run: oldRun, herdrBin: "herdr", wake: true }), /needs upgrading/);
+  assert.equal(sends, 1, "must not retry a possibly delivered task as v1");
+});
+
 test("rejects empty or control-character remote commands before invoking SSH", async () => {
   for (const remoteCommand of ["", "   ", "pi-intercom\0--bad", "pi-intercom\t--bad", "pi-intercom\x1f--bad", "pi-intercom\x7f--bad"]) {
     const calls: string[] = [];

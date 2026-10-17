@@ -8,6 +8,7 @@ import { EventEmitter, once } from "node:events";
 import { spawn, type ChildProcess } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { ReplyTracker } from "./reply-tracker.ts";
+import { runCli } from "./cli.ts";
 import type { BrokerMessage, Message, SessionInfo } from "./types.ts";
 import type { SendResult } from "./broker/client.ts";
 import {
@@ -2579,6 +2580,25 @@ test("explicit non-blocking wake requests survive transport without creating a p
     await cleanup();
   }
   });
+});
+
+test("relay v2 wake semantics reach the default receiver and never policy remains authoritative", { concurrency: false }, async () => {
+  for (const [policy, wake, expectedTurns] of [["replies", true, 1], ["replies", false, 0], ["always", false, 0], ["never", true, 0]] as const) {
+    await withIntercomConfig({ inboundTrigger: policy }, async () => {
+      const { default: register } = await import("./index.ts");
+      const { planner, cleanup } = await setupClients();
+      const harness = createExtensionHarness("relay-policy-fixture", { hasUI: true, isIdle: () => true });
+      try {
+        register(harness.pi as never); await harness.emitLifecycle("session_start");
+        const receiver = await waitForSessionByName(planner, "relay-policy-fixture");
+        const code = await runCli(["relay", "--envelope-stdin", "--json"], { client: new IntercomClient(), out: { write() {} }, err: { write() {} }, readStdin: async () => JSON.stringify({ version: 2, target: receiver.id, text: "remote-task-or-status", wake, trust: "ssh-asserted", origin: { name: "remote-fixture", sessionId: "remote-id", machine: "fixture" } }) });
+        assert.equal(code, 0); await waitForCondition(() => harness.sentMessages.length === 1, "relay injection");
+        assert.equal(harness.userMessages.length, expectedTurns, `${policy}/${wake}`);
+        const details = harness.sentMessages[0].message.details as { message: Message };
+        assert.equal(details.message.wake, wake); assert.equal(details.message.expectsReply, undefined);
+      } finally { await harness.emitLifecycle("session_shutdown"); await cleanup(); }
+    });
+  }
 });
 
 test("idle inbound asks include an exact replyTo hint", { concurrency: false }, async () => {

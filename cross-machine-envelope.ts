@@ -3,11 +3,13 @@ import type { CrossMachineOrigin } from "./types.ts";
 export type { CrossMachineOrigin } from "./types.ts";
 
 export interface CrossMachineEnvelope {
-  version: 1;
+  version: 1 | 2;
   target: string;
   text: string;
   origin: CrossMachineOrigin;
   trust: "ssh-asserted";
+  /** Present only in relay v2; omitted preserves v1 status-message semantics. */
+  wake?: boolean;
 }
 
 export const MAX_RELAY_ENVELOPE_BYTES = 1024 * 1024;
@@ -15,7 +17,8 @@ export const MAX_RELAY_TARGET_BYTES = 1024;
 export const MAX_RELAY_TEXT_BYTES = 256 * 1024;
 export const MAX_RELAY_ORIGIN_FIELD_BYTES = 1024;
 
-const ENVELOPE_FIELDS = ["origin", "target", "text", "trust", "version"];
+const ENVELOPE_FIELDS_V1 = ["origin", "target", "text", "trust", "version"];
+const ENVELOPE_FIELDS_V2 = ["origin", "target", "text", "trust", "version", "wake"];
 const ORIGIN_FIELDS = ["machine", "name", "sessionId"];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -66,13 +69,16 @@ export function parseRelayEnvelope(raw: string): CrossMachineEnvelope {
   if (!isRecord(value)) {
     throw new Error("Invalid cross-machine relay envelope.");
   }
-  if (value.version !== 1) {
+  if (value.version !== 1 && value.version !== 2) {
     throw new Error("Unsupported cross-machine relay envelope version; upgrade pi-intercom on both machines.");
+  }
+  if (value.version === 2 && typeof value.wake !== "boolean") {
+    throw new Error("Relay v2 requires an explicit boolean wake value.");
   }
   if (value.trust !== "ssh-asserted") {
     throw new Error("Unsupported cross-machine relay envelope trust.");
   }
-  if (!hasExactlyFields(value, ENVELOPE_FIELDS) || !isNonBlankWithinBytes(value.target, MAX_RELAY_TARGET_BYTES)
+  if (!hasExactlyFields(value, value.version === 2 ? ENVELOPE_FIELDS_V2 : ENVELOPE_FIELDS_V1) || !isNonBlankWithinBytes(value.target, MAX_RELAY_TARGET_BYTES)
     || typeof value.text !== "string" || Buffer.byteLength(value.text, "utf8") > MAX_RELAY_TEXT_BYTES || !isRecord(value.origin)
     || !hasExactlyFields(value.origin, ORIGIN_FIELDS)
     || !isNonBlankWithinBytes(value.origin.name, MAX_RELAY_ORIGIN_FIELD_BYTES)

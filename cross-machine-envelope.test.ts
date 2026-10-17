@@ -25,6 +25,19 @@ function envelope(overrides: Record<string, unknown> = {}) {
   };
 }
 
+test("relay v2 preserves only explicit boolean wake and v1 stays unchanged", () => {
+  for (const wake of [true, false]) {
+    const parsed = parseRelayEnvelope(JSON.stringify(envelope({ version: 2, wake })));
+    assert.equal(parsed.version, 2);
+    assert.equal(parsed.wake, wake);
+  }
+  for (const wake of [undefined, null, 0, "true"]) {
+    assert.throws(() => parseRelayEnvelope(JSON.stringify(envelope({ version: 2, wake }))), /boolean wake/);
+  }
+  assert.throws(() => parseRelayEnvelope(JSON.stringify(envelope({ wake: true }))), /Invalid/);
+  assert.equal(parseRelayEnvelope(JSON.stringify(envelope())).wake, undefined);
+});
+
 test("machine names default to the lowercased short hostname", () => {
   assert.equal(defaultMachineName("Build-Host.EXAMPLE"), "build-host");
 });
@@ -101,6 +114,6 @@ test("relay parser rejects malformed envelopes and blank routing identities", ()
 });
 
 test("relay parser rejects unsupported versions and trust claims", () => {
-  assert.throws(() => parseRelayEnvelope(JSON.stringify(envelope({ version: 2 }))), /Unsupported cross-machine relay envelope version/);
+  assert.throws(() => parseRelayEnvelope(JSON.stringify(envelope({ version: 3 }))), /Unsupported cross-machine relay envelope version/);
   assert.throws(() => parseRelayEnvelope(JSON.stringify(envelope({ trust: "verified" }))), /Unsupported cross-machine relay envelope trust/);
 });

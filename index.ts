@@ -1804,6 +1804,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
             machine: config.crossMachine.machineName,
           }, {
             remoteCommand: config.crossMachine.remoteCommand,
+            ...(request.wake !== undefined || request.handover ? { wake: request.wake ?? true } : {}),
           });
           const remoteTarget = relaySenderName({ name: remote.agent.name, machine: remote.machine.label });
           pi.appendEntry("intercom_sent", {
