@@ -114,6 +114,31 @@ test("ordinary current context does not override ambiguous pending ID prefix", (
   assert.deepEqual(tracker.listPending(1004).map((context) => context.message.id), ["ask-1", "ask-2"]);
 });
 
+test("reply answers the ask, not an earlier message that started no turn", () => {
+  const tracker = new ReplyTracker();
+  const fyi = tracker.recordIncomingMessage(createSession("fyi-id", "fyi"), createMessage("fyi-1", "FYI", false), 1000);
+  tracker.queueTurnContext(fyi);
+  const ask = tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "Need a decision"), 1001);
+  tracker.queueTurnContext(ask);
+  tracker.beginTurn(1002);
+
+  assert.equal(tracker.resolveReplyTarget({}, 1003).message.id, "ask-1");
+
+  tracker.markReplied("ask-1");
+  tracker.endTurn();
+  tracker.beginTurn(1004);
+  assert.throws(() => tracker.resolveReplyTarget({}, 1005), /No active intercom context to reply to/);
+});
+
+test("reply needs a target when several asks arrive before one turn", () => {
+  const tracker = new ReplyTracker();
+  tracker.queueTurnContext(tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "First"), 1000));
+  tracker.queueTurnContext(tracker.recordIncomingMessage(createSession("reviewer-id", "reviewer"), createMessage("ask-2", "Second"), 1001));
+  tracker.beginTurn(1002);
+
+  assert.throws(() => tracker.resolveReplyTarget({}, 1003), /Multiple pending asks — specify `replyTo` or `to`/);
+});
+
 test("reply with to resolves matching pending ask", () => {
   const tracker = new ReplyTracker();
   tracker.recordIncomingMessage(createSession("planner-id", "planner"), createMessage("ask-1", "First"), 1000);

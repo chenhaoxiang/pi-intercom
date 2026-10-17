@@ -10,7 +10,7 @@
 
 ## 发布版本与分支约定
 
-当前维护版本为 **0.17.0-fork.1**，基于社区 **0.17.0**。fork 版本统一使用 `<社区版本>-fork.<修订号>`，本地修订不冒充社区新版本。
+当前维护版本为 **0.17.1-fork.1**，基于社区 **0.17.1**。fork 版本统一使用 `<社区版本>-fork.<修订号>`，本地修订不冒充社区新版本。
 
 - `main`：我们的维护、整合与发布主线，保留 fork 修复。
 - `upstream-main`：仅镜像社区 `main`，不加入 fork 提交，也不作为安装来源。
@@ -19,7 +19,7 @@
 固定版本安装：
 
 ```bash
-pi install git:github.com/chenhaoxiang/pi-intercom@v0.17.0-fork.1
+pi install git:github.com/chenhaoxiang/pi-intercom@v0.17.1-fork.1
 ```
 
 [GitHub Releases](https://github.com/chenhaoxiang/pi-intercom/releases) 提供可安装的包、来源清单和 `SHA256SUMS` 校验文件；这不是向上游作者的 npm 命名空间发布。发布及制品安装流程见[维护说明](docs/releasing.md)。
@@ -68,7 +68,7 @@ intercom({ action: "handover", to: "worker", message: "继续当前计划，并�
 
 本 fork 保留原有 intercom 体验，并为长期运行的本地 Pi 会话补充可靠性边界：
 
-- 社区 0.17.0 修复：会话池隔离、接收方确认投递、失联会话清理、broker 重连重试和共享空闲唤醒；
+- 社区 0.17.1 修复：Windows 状态持久化、限制无响应接收方的积压写入、默认回复优先处理待答请求；保留 0.17.0 的会话池隔离、接收方确认投递与重连处理；
 - broker 重启和 Pi reload 后仍可恢复的 `ask` / `reply` 路由；发送方丢失原投递回执后，使用原消息 ID 重放仍会显示“结果未确认”，重试必须使用新消息 ID；
 - 明确的消息 ID、发送序号、时间戳、投递状态和回复提示；
 - 有界去重：同一消息在一个接收会话中最多注入一次；
