@@ -81,7 +81,8 @@ const defaults: IntercomConfig = {
   brokerCommand: "npx",
   brokerArgs: ["--no-install", "tsx"],
   confirmSend: false,
-  inboundTrigger: "always",
+  // Ordinary peer status messages are context, not new work. Explicit replies and asks still wake.
+  inboundTrigger: "replies",
   busyDelivery: "steer",
   enabled: true,
   replyHint: true,

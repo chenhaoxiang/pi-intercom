@@ -10,6 +10,8 @@ This is the maintained fork of nicobailon/pi-intercom. Use an isolated worktree;
 
 ## Documentation map
 
+- `docs/maintenance/2026-10-18-inbound-wake-convergence.md`: ordinary peer status is context-only, explicit asks/replies and wake requests remain actionable; native custom turns preserve source on Pi 1.3+.
+
 - `docs/maintenance/2026-10-17-community-0.17.1.md`: exact community integration, explicit ordinary reply versus pending ask semantics, queue bounds, validation and release/install boundaries.
 
 - `docs/maintenance/2026-10-11-installed-acceptance.md`: v0.17.0-fork.1 immutable release download, installed byte readback, RPC smoke and restart boundary.

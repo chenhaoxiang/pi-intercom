@@ -1,6 +1,6 @@
 {
   "name": "pi-intercom",
-  "version": "0.17.1-fork.1",
+  "version": "0.17.1-fork.2",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/chenhaoxiang/pi-intercom.git" },
   "homepage": "https://github.com/chenhaoxiang/pi-intercom#readme",

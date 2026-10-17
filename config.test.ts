@@ -36,11 +36,11 @@ test("loadConfig reads config below PI_CODING_AGENT_DIR", async () => {
   }
 });
 
-test("loadConfig defaults inboundTrigger to current auto-trigger behavior", async () => {
+test("loadConfig defaults ordinary inbound messages to reply-driven wake behavior", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-intercom-config-"));
   try {
     await withAgentDir(root, () => {
-      assert.equal(loadConfig().inboundTrigger, "always");
+      assert.equal(loadConfig().inboundTrigger, "replies");
       assert.equal(loadConfig().busyDelivery, "steer");
     });
   } finally {

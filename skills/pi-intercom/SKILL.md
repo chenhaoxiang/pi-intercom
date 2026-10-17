@@ -316,6 +316,8 @@ const reply = await intercom({
 
 ### Use `send` for notifications
 
+Ordinary `send` is context-only under the default reply-driven policy. Do not echo receipt/status notices. For an explicit non-blocking task request use `intercom({ action: "send", to: "worker", message: "Continue the authorized task", wake: true })`. `ask`, `reply`, and `handover` already request attention; `inboundTrigger: "never"` remains authoritative.
+
 When you just want to inform:
 
 ```typescript
