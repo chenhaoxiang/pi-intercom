@@ -13,7 +13,7 @@ const repoDir = process.cwd();
 const sharedHomeDir = mkdtempSync(path.join(tmpdir(), "pi-intercom-priority-home-"));
 const runtimeAgentDir = process.platform === "win32" ? sharedHomeDir : mkdtempSync("/tmp/piic-");
 mkdirSync(path.join(runtimeAgentDir, "intercom"), { recursive: true });
-writeFileSync(path.join(runtimeAgentDir, "intercom", "config.json"), JSON.stringify({ busyDelivery: "human-first" }));
+writeFileSync(path.join(runtimeAgentDir, "intercom", "config.json"), JSON.stringify({ inboundTrigger: "always", busyDelivery: "human-first" }));
 const previousHome = process.env.HOME;
 const previousUserProfile = process.env.USERPROFILE;
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;

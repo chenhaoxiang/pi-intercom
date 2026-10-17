@@ -36,7 +36,7 @@ interface FakeClientOptions {
 
 class FakeClient implements CliClient {
   registrations: SessionRegistration[] = [];
-  sends: Array<{ to: string; text: string; expectsReply?: boolean; crossMachine?: CrossMachineProvenance }> = [];
+  sends: Array<{ to: string; text: string; expectsReply?: boolean; wake?: boolean; crossMachine?: CrossMachineProvenance }> = [];
   disconnected = false;
   private readonly options: FakeClientOptions;
   private listeners: Array<(from: SessionInfo, message: Message) => void> = [];
@@ -55,8 +55,8 @@ class FakeClient implements CliClient {
     return this.options.sessions ?? [];
   }
 
-  async send(to: string, options: { text: string; expectsReply?: boolean; crossMachine?: CrossMachineProvenance }): Promise<{ id: string; delivered: boolean; reason?: string }> {
-    this.sends.push({ to, text: options.text, expectsReply: options.expectsReply, ...(options.crossMachine ? { crossMachine: options.crossMachine } : {}) });
+  async send(to: string, options: { text: string; expectsReply?: boolean; wake?: boolean; crossMachine?: CrossMachineProvenance }): Promise<{ id: string; delivered: boolean; reason?: string }> {
+    this.sends.push({ to, text: options.text, expectsReply: options.expectsReply, ...(options.wake === undefined ? {} : { wake: options.wake }), ...(options.crossMachine ? { crossMachine: options.crossMachine } : {}) });
     if (this.options.sendError) {
       throw this.options.sendError;
     }
@@ -165,6 +165,15 @@ test("buildCliRegistration fills required session fields", () => {
   assert.equal(registration.lastActivity, 42);
   assert.equal(typeof registration.cwd, "string");
   assert.equal(typeof registration.pid, "number");
+});
+
+test("relay CLI preserves wake true/false without fake ask state and acknowledges v2", async () => {
+  for (const wake of [true, false]) {
+    const client = new FakeClient(); const out = new MemorySink();
+    const code = await runCli(["relay", "--envelope-stdin", "--json"], { client, out, err: new MemorySink(), readStdin: async () => JSON.stringify({ version: 2, target: "receiver", text: "handoff", wake, trust: "ssh-asserted", origin: { name: "sender", sessionId: "source", machine: "remote" } }) });
+    assert.equal(code, 0); assert.equal(client.sends[0].wake, wake);
+    assert.equal(client.sends[0].expectsReply, undefined); assert.equal(JSON.parse(out.text()).version, 2);
+  }
 });
 
 test("runCli list prints roster rows", async () => {

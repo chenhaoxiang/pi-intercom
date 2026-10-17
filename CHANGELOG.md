@@ -4,6 +4,12 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.17.1-fork.2] - 2026-10-18
+
+- Default ordinary peer status to context-only; explicit asks/replies, handovers and `wake: true` still request attention.
+- Preserve source with native custom turns on Pi 1.3+ and retain legacy/explicit policy and human-priority behavior.
+- Carry explicit wake semantics across relay envelope v2; old relay peers fail closed instead of silently dropping task attention.
+
 ## [0.17.1-fork.1] - 2026-10-17
 
 - Integrate community v0.17.1 Windows persistence, bounded stalled-peer queues and ask-preferred bare replies.

@@ -10,7 +10,7 @@ Direct 1:1 messaging between Pi sessions on the same machine. This repository is
 
 ## Releases and branch policy
 
-The maintained release is **0.17.1-fork.1**, based on community **0.17.1**. Fork releases use `<community-version>-fork.<revision>`; the fork revision increases without pretending to be a new upstream release.
+The source candidate is **0.17.1-fork.2**; the latest verified published release before this change is **0.17.1-fork.1**, based on community **0.17.1**. Fork releases use `<community-version>-fork.<revision>`; the fork revision increases without pretending to be a new upstream release.
 
 - `main`: our maintained integration and release branch, including fork fixes.
 - `upstream-main`: an exact mirror of the community's `main`, with no fork commits. Never install from this branch.
@@ -107,7 +107,7 @@ Useful settings include:
 
 ```json
 {
-  "inboundTrigger": "always",
+  "inboundTrigger": "replies",
   "busyDelivery": "steer",
   "replyHint": true,
   "confirmSend": false,
@@ -115,8 +115,8 @@ Useful settings include:
 }
 ```
 
-- `inboundTrigger`: `always`, `replies`, or `never` for broker-delivered message turns;
-- `busyDelivery`: `steer` for prompt delivery, or `human-first` to wait for a safe turn boundary;
+- `inboundTrigger`: `replies` by default; `always` preserves legacy wake-on-every-message behavior, and `never` disables automatic turns. Ordinary `send` messages are context-only unless `wake: true`; asks/replies still wake.
+- `busyDelivery`: `steer` for prompt delivery, or `human-first` to wait for a safe turn boundary. This only controls delivery while busy; it does not turn ordinary status messages into new work.
 - `stableId`: optional restart-stable session identity; use a distinct value per live session; after upgrading from 0.16.x, close all Pi sessions once if they previously shared one value;
 - `confirmSend`: require UI confirmation for outbox requests;
 - `status`: append a custom status suffix without replacing Pi's lifecycle status.

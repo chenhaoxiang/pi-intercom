@@ -39,7 +39,7 @@ import { relaySenderName } from "./cross-machine-envelope.ts";
 import { runCommand, sendCrossMachine } from "./cross-machine-transport.ts";
 import { listMachineAgents, listSavedMachines, parseCrossMachineTarget } from "./cross-machine-discovery.ts";
 import { formatHandoverMessage, generateHandoverBody, readGitState } from "./handover.ts";
-import { isIdleWakePending, releaseIdleWake, reserveIdleWake } from "./idle-wake.ts";
+import { isIdleWakePending, releaseIdleWake, reserveIdleWake, supportsNativeCustomTurns } from "./idle-wake.ts";
 
 const INTERCOM_TOOL_NAME = "intercom";
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
@@ -91,6 +91,8 @@ interface DeliveryRequest {
   replyTo?: string;
   supersedes?: string;
   retryOf?: string;
+  /** Explicit non-blocking task request, not a status notification. */
+  wake?: boolean;
   /** Handovers are always new messages and are not sent once the signal aborts. */
   handover?: boolean;
 }
@@ -1316,11 +1318,10 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     if (forceTrigger) {
       return true;
     }
-    if (config.inboundTrigger === "always") {
-      return true;
-    }
+    if (config.inboundTrigger === "never" || entry.message.wake === false) return false;
+    if (config.inboundTrigger === "always") return true;
     if (config.inboundTrigger === "replies") {
-      return Boolean(entry.message.replyTo);
+      return Boolean(entry.message.wake === true || entry.message.replyTo || entry.message.expectsReply);
     }
     return false;
   }
@@ -1337,7 +1338,12 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       : entry.from.name || entry.from.id.slice(0, 8);
     const replyInstruction = replyCommand ? `\n\nTo reply, use the intercom tool: ${replyCommand}` : "";
     const deliveryMetadata = formatInboundDeliveryMetadata(injectedMessage);
-    const trigger = delivery === "trigger" && shouldTriggerInboundMessage(entry, forceTrigger);
+    const actionable = shouldTriggerInboundMessage(entry, forceTrigger);
+    const trigger = delivery === "trigger" && actionable;
+    const native = supportsNativeCustomTurns();
+    const wakeContext = trigger ? getLiveContext(runtimeContext, generation) : undefined;
+    const nativeWake = native && wakeContext?.isIdle() && !isIdleWakePending(wakeContext.sessionManager);
+    if (nativeWake) reserveIdleWake(wakeContext.sessionManager);
     pi.sendMessage(
       {
         customType: "intercom_message",
@@ -1345,12 +1351,12 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         display: true,
         details: deliveredEntry,
       },
-      trigger ? undefined : { deliverAs: "steer" }
+      nativeWake ? { triggerTurn: true } : trigger ? undefined
+        : actionable ? { deliverAs: "steer" } : { triggerTurn: false },
     );
-    // Pi skips before_agent_start for sendMessage({ triggerTurn: true }) turns (pi#5581),
-    // so wake an idle session with a user prompt that runs the normal prompt lifecycle.
-    const wakeContext = trigger ? getLiveContext(runtimeContext, generation) : undefined;
-    if (wakeContext?.isIdle() && !isIdleWakePending(wakeContext.sessionManager)) {
+    // Older Pi hosts skip before_agent_start for custom trigger turns, so wake
+    // through the normal user lifecycle. Pi 1.3+ keeps the typed custom source.
+    if (!native && wakeContext?.isIdle() && !isIdleWakePending(wakeContext.sessionManager)) {
       reserveIdleWake(wakeContext.sessionManager);
       pi.sendUserMessage("New intercom message above.", { deliverAs: "steer" });
     }
@@ -1798,6 +1804,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
             machine: config.crossMachine.machineName,
           }, {
             remoteCommand: config.crossMachine.remoteCommand,
+            ...(request.wake !== undefined || request.handover ? { wake: request.wake ?? true } : {}),
           });
           const remoteTarget = relaySenderName({ name: remote.agent.name, machine: remote.machine.label });
           pi.appendEntry("intercom_sent", {
@@ -1859,6 +1866,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         replyTo: effectiveReplyTo,
         supersedes,
         retryOf,
+        ...(request.wake !== undefined || request.handover ? { wake: request.wake ?? true } : {}),
       });
       if (!result.delivered) {
         return {
@@ -2517,7 +2525,8 @@ Usage:
   intercom({ action: "list" })                    → List active sessions
   intercom({ action: "list-cwd" })                → List sessions in the current working directory
   intercom({ action: "list-cwd", cwd: "/path" })  → List sessions in a specific directory
-  intercom({ action: "send", to: "name-or-id", message: "..." })  → Send message
+  intercom({ action: "send", to: "name-or-id", message: "..." })  → Record a status notification
+  intercom({ action: "send", to: "name-or-id", message: "...", wake: true }) → Request non-blocking task attention
   intercom({ action: "send", cwd: "/path", openProjectPaneIfMissing: true, message: "..." }) → Open a visible Herdr project pane when needed, then send
   intercom({ action: "ask", to: "name-or-id", message: "..." })   → Ask and wait for reply
   intercom({ action: "handover", to: "name-or-id", message: "next task" }) → Summarize this session and hand it over; the receiver acts on it
@@ -2538,6 +2547,9 @@ Usage:
       })),
       message: Type.Optional(Type.String({
         description: "Message to send (for 'send', 'ask', or 'reply' action). For 'handover', the optional next task for the receiver.",
+      })),
+      wake: Type.Optional(Type.Boolean({
+        description: "For send: true requests a non-blocking task handoff turn; false records a status notice without waking. Ordinary send defaults to context-only. Ask, reply and handover already request attention. Receiver never policy remains authoritative.",
       })),
       attachments: Type.Optional(Type.Array(Type.Object({
         type: StringEnum(["file", "snippet", "context"] as const),
@@ -2581,7 +2593,7 @@ Usage:
 
       syncPresenceIdentity(ctx.sessionManager.getSessionId());
 
-      const { action, to, message, attachments, replyTo, messageId, supersedes, retryOf, cwd, openProjectPaneIfMissing, focus } = params;
+      const { action, to, message, wake, attachments, replyTo, messageId, supersedes, retryOf, cwd, openProjectPaneIfMissing, focus } = params;
 
       switch (action) {
         case "list": {
@@ -2706,7 +2718,7 @@ Usage:
             };
           }
           return deliverMessage(connectedClient, ctx, _signal, {
-            to, cwd, openProjectPaneIfMissing, focus, message, attachments, replyTo, supersedes, retryOf,
+            to, cwd, openProjectPaneIfMissing, focus, message, wake, attachments, replyTo, supersedes, retryOf,
           });
         }
 

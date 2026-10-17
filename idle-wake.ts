@@ -1,3 +1,12 @@
+import { VERSION } from "@earendil-works/pi-coding-agent";
+
+export function supportsNativeCustomTurns(version: string = VERSION): boolean {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(version.trim());
+  if (!match) return false;
+  return (Number(match[1]) > 1 || (Number(match[1]) === 1 && Number(match[2]) >= 3))
+    && (!match[4] || /^fork\.\d+$/.test(match[4]));
+}
+
 // One wake prompt per idle session, shared by every extension that wakes Pi with sendUserMessage
 // (pi-intercom and pi-subagents). Pi marks a run active only after the prompt's async preflight, so
 // a second wake sent in that gap throws "Agent is already processing a prompt" from agent.prompt().

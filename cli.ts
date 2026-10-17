@@ -126,7 +126,7 @@ export interface CliClient {
   sessionId?: string | null;
   connect(session: SessionRegistration, sessionId?: string): Promise<void>;
   listSessions(options?: { timeoutMs?: number }): Promise<SessionInfo[]>;
-  send(to: string, options: { text: string; expectsReply?: boolean; crossMachine?: CrossMachineProvenance }): Promise<{ id: string; delivered: boolean; reason?: string }>;
+  send(to: string, options: { text: string; expectsReply?: boolean; wake?: boolean; crossMachine?: CrossMachineProvenance }): Promise<{ id: string; delivered: boolean; reason?: string }>;
   on(event: "message", listener: (from: SessionInfo, message: Message) => void): unknown;
   disconnect(): Promise<void>;
 }
@@ -216,6 +216,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
       const envelope = relayEnvelope!;
       const result = await deps.client.send(envelope.target, {
         text: relayMessage(envelope),
+        ...(envelope.wake === undefined ? {} : { wake: envelope.wake }),
         crossMachine: {
           type: "ssh-relay",
           version: 1,
@@ -224,7 +225,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
         },
       });
       if (!result.delivered) return reportFailure(`relay delivery failed: ${result.reason ?? "unknown reason"}`);
-      if (opts.json) out.write(`${JSON.stringify({ ok: true, delivered: true, id: result.id, origin: relaySenderName(envelope.origin), trust: envelope.trust })}\n`);
+      if (opts.json) out.write(`${JSON.stringify({ ok: true, version: envelope.version, delivered: true, id: result.id, origin: relaySenderName(envelope.origin), trust: envelope.trust })}\n`);
       else out.write(`relayed from ${relaySenderName(envelope.origin)} to ${envelope.target} (${result.id})\n`);
       return 0;
     }

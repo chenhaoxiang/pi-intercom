@@ -19,6 +19,7 @@ export interface CrossMachineDeps {
   remoteCommand?: string;
   discoveryTimeoutMs?: number;
   deliveryTimeoutMs?: number;
+  wake?: boolean;
 }
 
 export interface CrossMachineDelivery {
@@ -86,7 +87,10 @@ export async function sendCrossMachine(
     herdrBin: herdr,
     ...(deps.discoveryTimeoutMs === undefined ? {} : { discoveryTimeoutMs: deps.discoveryTimeoutMs }),
   });
-  const envelope: CrossMachineEnvelope = { version: 1, target: match.agent.sessionId ?? match.agent.name, text, origin, trust: "ssh-asserted" };
+  const envelope: CrossMachineEnvelope = {
+    version: deps.wake === undefined ? 1 : 2, target: match.agent.sessionId ?? match.agent.name, text, origin, trust: "ssh-asserted",
+    ...(deps.wake === undefined ? {} : { wake: deps.wake }),
+  };
   const delivered = await run(
     "ssh",
     [match.machine.target, `${remoteCommand} relay --envelope-stdin --json`],
@@ -99,12 +103,13 @@ export async function sendCrossMachine(
   } catch {
     throw relaySupportError(match.machine.label);
   }
-  if (!isRecord(response) || typeof response.ok !== "boolean" || ("version" in response && response.version !== 1)) {
+  if (!isRecord(response) || typeof response.ok !== "boolean" || ("version" in response && response.version !== envelope.version)) {
     throw relaySupportError(match.machine.label);
   }
   if (delivered.code !== 0 || response.ok !== true) {
     if (typeof response.error !== "string") throw relaySupportError(match.machine.label);
     throw new Error(`Remote intercom delivery via ${match.machine.label} failed: ${response.error}`);
   }
+  if (envelope.version === 2 && response.version !== 2) throw relaySupportError(match.machine.label);
   return { ...match, stdout: delivered.stdout };
 }

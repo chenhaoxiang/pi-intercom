@@ -10,7 +10,7 @@
 
 ## 发布版本与分支约定
 
-当前维护版本为 **0.17.1-fork.1**，基于社区 **0.17.1**。fork 版本统一使用 `<社区版本>-fork.<修订号>`，本地修订不冒充社区新版本。
+本变更源码候选版本为 **0.17.1-fork.2**；变更前最近已核验的已发布维护版本为 **0.17.1-fork.1**，基于社区 **0.17.1**。fork 版本统一使用 `<社区版本>-fork.<修订号>`，本地修订不冒充社区新版本。
 
 - `main`：我们的维护、整合与发布主线，保留 fork 修复。
 - `upstream-main`：仅镜像社区 `main`，不加入 fork 提交，也不作为安装来源。
@@ -107,7 +107,7 @@ broker 首次使用时自动启动，空闲一段时间后退出，并受启动�
 
 ```json
 {
-  "inboundTrigger": "always",
+  "inboundTrigger": "replies",
   "busyDelivery": "steer",
   "replyHint": true,
   "confirmSend": false,
@@ -115,8 +115,8 @@ broker 首次使用时自动启动，空闲一段时间后退出，并受启动�
 }
 ```
 
-- `inboundTrigger`：broker 消息触发策略，可选 `always`、`replies`、`never`；
-- `busyDelivery`：`steer` 立即交给当前提示，或 `human-first` 等待安全的 turn 边界；
+- `inboundTrigger`：默认是 `replies`；`always` 保留旧的“每条消息都唤醒”行为，`never` 关闭自动回合。普通 `send` 默认只作为上下文，不会唤醒；需要任务关注时显式传 `wake: true`，ask/reply 仍会唤醒；
+- `busyDelivery`：`steer` 立即交给当前提示，或 `human-first` 等待安全的 turn 边界。它只控制忙碌时的投递，不会把普通状态消息变成新任务；
 - `stableId`：可选的重启稳定会话身份；每个活跃会话使用独立值；从 0.16.x 升级且此前共用该值时，待任务结束再关闭全部 Pi 会话一次；
 - `confirmSend`：发送前是否要求 UI 确认；
 - `status`：在 Pi 生命周期状态后追加自定义状态，不覆盖原状态。

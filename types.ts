@@ -110,6 +110,8 @@ export interface Message {
   retryOf?: string;
   replyTo?: string;
   expectsReply?: boolean;
+  /** Explicitly request a receiver turn for a task handoff, or suppress one for a status notice. */
+  wake?: boolean;
   provenance?: MessageProvenance;
   crossMachine?: CrossMachineProvenance;
   content: {

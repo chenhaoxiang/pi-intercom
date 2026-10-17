@@ -8,6 +8,7 @@ import { EventEmitter, once } from "node:events";
 import { spawn, type ChildProcess } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { ReplyTracker } from "./reply-tracker.ts";
+import { runCli } from "./cli.ts";
 import type { BrokerMessage, Message, SessionInfo } from "./types.ts";
 import type { SendResult } from "./broker/client.ts";
 import {
@@ -45,6 +46,10 @@ const { IntercomClient, IntercomSessionHeldError } = await import("./broker/clie
 const { getTsxLoaderPath } = await import("./broker/spawn.ts");
 const tsxImportArgs = ["--import", pathToFileURL(getTsxLoaderPath()).href];
 const { getAskTimeoutMs, getConfigPath } = await import("./config.ts");
+// Retained integration cases characterize the explicit legacy all-message policy.
+// Focused cases below exercise the new default reply-driven policy.
+mkdirSync(path.dirname(getConfigPath()), { recursive: true });
+writeFileSync(getConfigPath(), JSON.stringify({ inboundTrigger: "always" }));
 process.on("exit", () => {
   process.env.HOME = previousHome;
   process.env.USERPROFILE = previousUserProfile;
@@ -57,7 +62,7 @@ async function withIntercomConfig<T>(config: Record<string, unknown>, fn: () => 
   const configPath = getConfigPath();
   const previous = existsSync(configPath) ? readFileSync(configPath, "utf-8") : undefined;
   mkdirSync(path.dirname(configPath), { recursive: true });
-  writeFileSync(configPath, JSON.stringify(config));
+  writeFileSync(configPath, JSON.stringify({ inboundTrigger: "always", ...config }));
   try {
     return await fn();
   } finally {
@@ -619,13 +624,13 @@ async function withConfirmSendEnabled<T>(fn: () => T | Promise<T>): Promise<T> {
   const intercomDir = getIntercomDirPath();
   mkdirSync(intercomDir, { recursive: true });
   const configPath = getConfigPath(intercomDir);
-  const existed = existsSync(configPath);
-  writeFileSync(configPath, JSON.stringify({ confirmSend: true }), "utf-8");
+  const previous = existsSync(configPath) ? readFileSync(configPath, "utf-8") : undefined;
+  writeFileSync(configPath, JSON.stringify({ inboundTrigger: "always", confirmSend: true }), "utf-8");
   try {
     return await fn();
   } finally {
-    if (existed) {
-      writeFileSync(configPath, JSON.stringify({ confirmSend: false }), "utf-8");
+    if (previous !== undefined) {
+      writeFileSync(configPath, previous, "utf-8");
     } else {
       removeSync(configPath, { force: true });
     }
@@ -2516,7 +2521,8 @@ test("busy interactive sessions steer top-level asks without aborting", { concur
   }
 });
 
-test("idle interactive sessions wake through a user prompt instead of triggerTurn", { concurrency: false }, async () => {
+test("idle ordinary messages stay context-only while explicit asks wake through a user prompt", { concurrency: false }, async () => {
+  await withIntercomConfig({ inboundTrigger: "replies" }, async () => {
 	const { default: piIntercomExtension } = await import("./index.ts");
 	const { planner, cleanup } = await setupClients();
 	const harness = createExtensionHarness("idle-trigger-worker", {
@@ -2529,22 +2535,70 @@ test("idle interactive sessions wake through a user prompt instead of triggerTur
 		await harness.emitLifecycle("session_start");
 		const worker = await waitForSessionByName(planner, "idle-trigger-worker");
 
-		assert.equal((await planner.send(worker.id, { messageId: "idle-trigger", text: "Handle this now" })).delivered, true);
+		assert.equal((await planner.send(worker.id, { messageId: "idle-context", text: "Status update only" })).delivered, true);
 		await new Promise((resolve) => setTimeout(resolve, 20));
 
 		assert.equal(harness.sentMessages.length, 1);
-		assert.equal(harness.sentMessages[0]?.options, undefined, "triggerTurn would bypass before_agent_start");
+		assert.deepEqual(harness.sentMessages[0]?.options, { triggerTurn: false });
+		assert.deepEqual(harness.userMessages, [], "ordinary peer status must not create a new model turn");
+
+		assert.equal((await planner.send(worker.id, { messageId: "idle-trigger", text: "Handle this now", expectsReply: true })).delivered, true);
+		await waitForCondition(() => harness.sentMessages.length === 2, "explicit ask injection");
+		assert.deepEqual(harness.sentMessages[1]?.options, undefined, "ask uses the normal before_agent_start lifecycle");
 		assert.deepEqual(harness.userMessages, ["New intercom message above."]);
 
 		await harness.emitLifecycle("agent_start");
 		await harness.emitLifecycle("agent_end");
-		assert.equal((await planner.send(worker.id, { messageId: "idle-trigger-2", text: "And this" })).delivered, true);
-		await waitForCondition(() => harness.sentMessages.length === 2, "second injected message");
+		assert.equal((await planner.send(worker.id, { messageId: "idle-trigger-2", text: "And this", expectsReply: true })).delivered, true);
+		await waitForCondition(() => harness.sentMessages.length === 3, "second explicit ask injection");
 		assert.equal(harness.userMessages.length, 2, "a started run re-arms the wake");
 	} finally {
 		await harness.emitLifecycle("session_shutdown");
 		await cleanup();
 	}
+  });
+});
+
+test("explicit non-blocking wake requests survive transport without creating a pending ask", { concurrency: false }, async () => {
+  await withIntercomConfig({ inboundTrigger: "replies" }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  const harness = createExtensionHarness("explicit-wake-worker", { hasUI: true, isIdle: () => true });
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const worker = await waitForSessionByName(planner, "explicit-wake-worker");
+    assert.equal((await planner.send(worker.id, { text: "Continue the authorized task", wake: true })).delivered, true);
+    await waitForCondition(() => harness.sentMessages.length === 1, "explicit wake injection");
+    assert.deepEqual(harness.userMessages, ["New intercom message above."]);
+    const details = harness.sentMessages[0]?.message.details as { message: Message };
+    assert.equal(details.message.wake, true);
+    assert.equal(details.message.expectsReply, undefined);
+    assert.deepEqual(await planner.listPendingAsks(), []);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+  });
+});
+
+test("relay v2 wake semantics reach the default receiver and never policy remains authoritative", { concurrency: false }, async () => {
+  for (const [policy, wake, expectedTurns] of [["replies", true, 1], ["replies", false, 0], ["always", false, 0], ["never", true, 0]] as const) {
+    await withIntercomConfig({ inboundTrigger: policy }, async () => {
+      const { default: register } = await import("./index.ts");
+      const { planner, cleanup } = await setupClients();
+      const harness = createExtensionHarness("relay-policy-fixture", { hasUI: true, isIdle: () => true });
+      try {
+        register(harness.pi as never); await harness.emitLifecycle("session_start");
+        const receiver = await waitForSessionByName(planner, "relay-policy-fixture");
+        const code = await runCli(["relay", "--envelope-stdin", "--json"], { client: new IntercomClient(), out: { write() {} }, err: { write() {} }, readStdin: async () => JSON.stringify({ version: 2, target: receiver.id, text: "remote-task-or-status", wake, trust: "ssh-asserted", origin: { name: "remote-fixture", sessionId: "remote-id", machine: "fixture" } }) });
+        assert.equal(code, 0); await waitForCondition(() => harness.sentMessages.length === 1, "relay injection");
+        assert.equal(harness.userMessages.length, expectedTurns, `${policy}/${wake}`);
+        const details = harness.sentMessages[0].message.details as { message: Message };
+        assert.equal(details.message.wake, wake); assert.equal(details.message.expectsReply, undefined);
+      } finally { await harness.emitLifecycle("session_shutdown"); await cleanup(); }
+    });
+  }
 });
 
 test("idle inbound asks include an exact replyTo hint", { concurrency: false }, async () => {
