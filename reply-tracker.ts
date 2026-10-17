@@ -55,6 +55,7 @@ export class ReplyTracker {
   private readonly pendingAsks = new Map<string, IntercomContext>();
   private readonly pendingTurnContexts: IntercomContext[] = [];
   private currentTurnContext: IntercomContext | null = null;
+  private currentOrdinaryTurnContext: IntercomContext | null = null;
 
   constructor(private readonly askTimeoutMs = getAskTimeoutMs()) {}
 
@@ -72,17 +73,29 @@ export class ReplyTracker {
 
   beginTurn(now = Date.now()): void {
     this.pruneExpired(now);
-    this.currentTurnContext = this.pendingTurnContexts.shift() ?? null;
+    // Every message queued since the last turn is visible to this one, and some of them
+    // started no turn (inboundTrigger "never"/"replies"). The bare-reply target is the only
+    // ask among them, or the newest message when none asks; several asks leave it to `to`.
+    const delivered = this.pendingTurnContexts.splice(0);
+    const asks = delivered.filter((context) => context.message.expectsReply);
+    // Keep explicit ordinary-message responses available without using them as
+    // the bare-reply target while a pending ask is visible in the same turn.
+    this.currentOrdinaryTurnContext = delivered.filter((context) => !context.message.expectsReply).at(-1) ?? null;
+    this.currentTurnContext = asks.length > 0
+      ? (asks.length === 1 ? asks[0]! : null)
+      : delivered.at(-1) ?? null;
   }
 
   endTurn(): void {
     this.currentTurnContext = null;
+    this.currentOrdinaryTurnContext = null;
   }
 
   reset(): void {
     this.pendingAsks.clear();
     this.pendingTurnContexts.length = 0;
     this.currentTurnContext = null;
+    this.currentOrdinaryTurnContext = null;
   }
 
   resolveReplyTarget(options: { to?: string; replyTo?: string }, now = Date.now()): IntercomContext {
@@ -108,11 +121,11 @@ export class ReplyTracker {
         // Ordinary inbound messages are turn contexts but not pending asks.
         // Permit an explicit response only when it addresses that exact
         // context; never fall back to an arbitrary destination.
+        const ordinaryContext = this.currentOrdinaryTurnContext;
         if (!hasPendingSenderMatch(pending, options.to)
-          && this.currentTurnContext
-          && !this.currentTurnContext.message.expectsReply
-          && matchesPendingSender(this.currentTurnContext, options.to)) {
-          return this.currentTurnContext;
+          && ordinaryContext
+          && matchesPendingSender(ordinaryContext, options.to)) {
+          return ordinaryContext;
         }
         throw error;
       }

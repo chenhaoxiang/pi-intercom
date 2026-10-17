@@ -10,7 +10,7 @@ Direct 1:1 messaging between Pi sessions on the same machine. This repository is
 
 ## Releases and branch policy
 
-The maintained release is **0.17.0-fork.1**, based on community **0.17.0**. Fork releases use `<community-version>-fork.<revision>`; the fork revision increases without pretending to be a new upstream release.
+The maintained release is **0.17.1-fork.1**, based on community **0.17.1**. Fork releases use `<community-version>-fork.<revision>`; the fork revision increases without pretending to be a new upstream release.
 
 - `main`: our maintained integration and release branch, including fork fixes.
 - `upstream-main`: an exact mirror of the community's `main`, with no fork commits. Never install from this branch.
@@ -19,7 +19,7 @@ The maintained release is **0.17.0-fork.1**, based on community **0.17.0**. Fork
 Install a reproducible release:
 
 ```bash
-pi install git:github.com/chenhaoxiang/pi-intercom@v0.17.0-fork.1
+pi install git:github.com/chenhaoxiang/pi-intercom@v0.17.1-fork.1
 ```
 
 [GitHub Releases](https://github.com/chenhaoxiang/pi-intercom/releases) include the installable package tarball, a provenance manifest, and `SHA256SUMS`. These GitHub releases are not npm publications under the upstream author's namespace. See [release maintenance](docs/releasing.md) for asset installation and future releases.
@@ -68,7 +68,7 @@ intercom({ action: "handover", to: "worker", message: "Continue from the current
 
 The fork keeps the original intercom UX and adds reliability boundaries needed for long-running local Pi sessions:
 
-- community 0.17.0 fixes: pool isolation, receiver-confirmed delivery, liveness cleanup, reconnect retries and shared idle wakes;
+- community 0.17.1 fixes: Windows state persistence, bounded stalled-peer queues and ask-preferred bare replies, retaining 0.17.0 pool isolation, receiver-confirmed delivery and reconnect behavior;
 - durable `ask` / `reply` routing across broker restarts and Pi reloads; if a sender loses the original delivery receipt, a same-ID replay remains an unconfirmed outcome and a retry must use a new message ID;
 - explicit message IDs, sender sequences, timestamps, delivery states, and reply hints;
 - bounded duplicate delivery: a message is injected at most once per receiving session;

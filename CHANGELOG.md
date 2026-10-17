@@ -4,6 +4,23 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.17.1-fork.1] - 2026-10-17
+
+- Integrate community v0.17.1 Windows persistence, bounded stalled-peer queues and ask-preferred bare replies.
+- Retain durable routing, pending-ask protection, dedupe, human-first delivery and restart-stable addressing.
+
+## [0.17.1] - 2026-10-14
+
+### Highlights
+- Extension state now saves on Windows. Before, every save failed quietly.
+- A plain `reply` answers the ask you are working on, not an older message that came in without starting a turn.
+- One stuck session can no longer make the broker's memory grow without limit.
+
+### Fixed
+- On Windows, extension state was never saved. Every save failed with `Failed to persist extension state`, because Windows won't flush a file that was opened read-only. The broker now opens the file for writing first. If a save still fails, the message now includes the underlying error. Thanks to [@coylemichael](https://github.com/coylemichael) for issue #166.
+- A plain `intercom({ action: "reply" })` could answer the wrong session. A message that didn't start a turn stayed queued. That covers every message under `inboundTrigger: "never"` and non-replies under `"replies"`. The next turn then replied to that message's sender instead of the ask the turn was about, and the asker waited until its ask timed out. A plain reply now answers the one ask that arrived since the last turn. If several asks arrived at once, it asks you to name the session with `to`. Thanks to [@peterdsharpe](https://github.com/peterdsharpe) for issue #167.
+- The broker kept every message for a session that had stopped reading from its connection, so one stuck session could grow the broker's memory without limit. One report reached 6 GB over a month. The broker now drops a connection once more than 8 MB is waiting for it, and later messages for that session wait in its mailbox, as with any other disconnect. Waiting messages also no longer use far more memory than their size. A session that reconnects to a large backlog still gets all of it. Thanks to [@luwanglin](https://github.com/luwanglin) for issue #168.
+
 ## [0.17.0-fork.1] - 2026-10-11
 
 - Integrate community 0.17.0 pool isolation, receiver-confirmed delivery, liveness cleanup and persistent reconnect.

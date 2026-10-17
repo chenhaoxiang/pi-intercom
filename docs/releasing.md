@@ -22,13 +22,13 @@ Applies only to chenhaoxiang/pi-intercom. The community project remains [nicobai
 
 ## Baseline for this release
 
-Version **0.17.0-fork.1** merges community main `14731a4873b500e19d000bf131142e430e4b7928` into the maintained fork. Existing fork reliability repairs `5877c30` and `a507c75` remain ancestors. The upstream pool isolation, receiver-confirmed delivery, liveness cleanup and reconnect changes are applied on top of durable routing, scoped pending-ask protection, dedupe, human-first delivery and restart-stable routing.
+Version **0.17.1-fork.1** merges community v0.17.1 `ddf288186d4c40b8a54fbe8c0d136cbe4893a032` into the maintained fork. Existing fork reliability repairs remain ancestors. The upstream Windows state, bounded stalled-peer queue and ask-preferred bare-reply changes are applied on top of durable routing, scoped pending-ask protection, dedupe, human-first delivery and restart-stable routing. See [the 0.17.1 synchronization report](maintenance/2026-10-17-community-0.17.1.md).
 
 ## Publish every version
 
 1. Fetch origin/main and create an isolated worktree from the latest remote integration branch. Keep all pre-existing dirty work untouched.
 2. Merge only reviewed community changes when needed; resolve conflicts without discarding fork fixes. Update package version, lockfile metadata (when present), and both README files.
-3. Run `npm ci --ignore-scripts` and the full `npm test` suite with synthetic/provider-free fixtures. On macOS use a short TMPDIR outside any Git tree and node_modules ancestor (in a project-specific tmp directory): socket length and fixture Git/dependency-discovery tests require it. Do not weaken assertions to make an unsuitable test directory pass. Review the exact diff and required CI.
+3. Run `npm ci --ignore-scripts` and the full `npm test` suite with synthetic/provider-free fixtures. On macOS use a short TMPDIR outside any Git tree and node_modules ancestor (in a project-specific tmp directory): socket length and fixture Git/dependency-discovery tests require it. Do not weaken assertions to make an unsuitable test directory pass. This repository currently has no tracked `.github/workflows` CI workflow; treat the full local suite, independent review, branch-protection state and release-asset verification as the applicable gates, and do not claim an untracked/external check passed without its run evidence.
 4. Merge the PR normally, then verify the remote main contains the validated head.
 5. At that exact main commit, run `npm pack --ignore-scripts --pack-destination tmp/release`. Inspect/extract the tarball and smoke-load it in an isolated Pi agent directory without model requests.
 6. Write `release-manifest.json` with repository, version, exact source commit, community base, mirror tip, package filename and SHA-256. Generate `SHA256SUMS` for both the tarball and manifest.
@@ -41,7 +41,7 @@ Prefer the pinned git command in README. For offline/artifact installs, download
 
 Keep the previous release/source available for rollback. Do not terminate the shared live broker or unrelated sessions as part of installation; existing processes may keep loaded modules until their own reload/restart.
 
-Community 0.17.0 allows only one live session per stable ID within a scope. If the old global config shared one `stableId`, migrate to distinct per-session `PI_INTERCOM_STABLE_ID` values and let active work finish before closing all Pi sessions once. Durable ask/reply routes survive broker restart, but a same-ID replay without its original delivery receipt reports an unconfirmed outcome; explicit retries use a new message ID.
+Community 0.17.1 retains the one-live-session-per-stable-ID rule within a scope. If the old global config shared one `stableId`, migrate to distinct per-session `PI_INTERCOM_STABLE_ID` values and let active work finish before closing all Pi sessions once. Durable ask/reply routes survive broker restart, but a same-ID replay without its original delivery receipt reports an unconfirmed outcome; explicit retries use a new message ID.
 
 ## 中文摘要
 
