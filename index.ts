@@ -590,7 +590,7 @@ function formatSessionLabel(session: SessionInfo, duplicates: Set<string>): stri
     return session.id;
   }
   return duplicates.has(session.name.toLowerCase())
-    ? `${session.name} (${session.id.slice(0, 8)})`
+    ? `${session.name} (${session.id})`
     : session.name;
 }
 function formatHerdrLocation(session: SessionInfo): string {
@@ -1452,7 +1452,9 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       ? `intercom({ action: "send", to: ${JSON.stringify(relaySenderName(receivedMessage.crossMachine.origin))}, message: "..." })`
       : config.replyHint && receivedMessage.expectsReply
         ? `intercom({ action: "reply", replyTo: ${JSON.stringify(receivedMessage.id)}, message: "..." })`
-        : undefined;
+        : config.replyHint
+          ? `intercom({ action: "send", to: ${JSON.stringify(from.id)}, message: "..." })`
+          : undefined;
     replyTracker.recordIncomingMessage(from, receivedMessage, receiverReceivedAt);
     emitMessageReceipt(receivedMessage.id, "acknowledged", "accepted by receiver");
     const entry = { from, message: receivedMessage, replyCommand, bodyText };
@@ -1827,9 +1829,14 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           };
         }
       }
+      // An exact pending message ID already identifies its sender, even if
+      // several live sessions share the same display name. Never guess when
+      // there is no such message binding; retain ordinary name ambiguity checks.
+      const boundReply = replyTo ? await resolveReplyTarget(connectedClient, { to, replyTo }) : undefined;
+      const resolvedTo = boundReply?.from.id ?? to;
       const target: DeliveryTarget = cwd
-        ? await resolveCwdDeliveryTarget(connectedClient, { to, cwd, openProjectPaneIfMissing, focus, signal })
-        : { id: await resolveSessionTarget(connectedClient, to) ?? to!, label: to! };
+        ? await resolveCwdDeliveryTarget(connectedClient, { to: resolvedTo, cwd, openProjectPaneIfMissing, focus, signal })
+        : { id: boundReply?.from.id ?? await resolveSessionTarget(connectedClient, to) ?? to!, label: to! };
       const sendTo = target.id;
       const targetDisplay = target.projectPane ? target.label : to ?? target.label;
       if (sendTo === connectedClient.sessionId) {

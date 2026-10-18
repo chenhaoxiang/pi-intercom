@@ -2601,6 +2601,59 @@ test("relay v2 wake semantics reach the default receiver and never policy remain
   }
 });
 
+test("ordinary inbound hints address the exact sender even when its name is duplicated", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const { default: register } = await import("./index.ts");
+  const harness = createExtensionHarness("exact-sender-worker", { hasUI: true, isIdle: () => true });
+  try {
+    register(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const worker = await waitForSessionByName(planner, "exact-sender-worker");
+    orchestrator.updatePresence({ name: "planner" });
+    await orchestrator.listSessions();
+    const result = await planner.send(worker.id, { text: "Status only", wake: false });
+    assert.equal(result.delivered, true);
+    await waitForCondition(() => harness.sentMessages.length === 1, "exact sender hint");
+    assert.ok((harness.sentMessages[0]?.message.content ?? "").includes(
+      `intercom({ action: "send", to: ${JSON.stringify(planner.sessionId)}, message: "..." })`));
+    assert.equal(harness.userMessages.length, 0);
+    const tool = harness.tools.find((item) => item.name === "intercom")!;
+    const ambiguous = await tool.execute("ambiguous-name", { action: "send", to: "planner", message: "reply" }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(ambiguous.details?.error, true, "unbound duplicate names must not silently pick a receiver");
+    const exact = await tool.execute("exact-name", { action: "send", to: planner.sessionId, message: "reply" }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(exact.details?.delivered, true);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("send with exact replyTo bypasses duplicate display names without bypassing sender binding", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const { default: register } = await import("./index.ts");
+  const harness = createExtensionHarness("bound-reply-worker", { hasUI: true, isIdle: () => true });
+  try {
+    register(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const worker = await waitForSessionByName(planner, "bound-reply-worker");
+    orchestrator.updatePresence({ name: "planner" });
+    await orchestrator.listSessions();
+    const askId = "duplicate-sender-exact-ask";
+    assert.equal((await planner.send(worker.id, { messageId: askId, text: "Please answer", expectsReply: true })).delivered, true);
+    await waitForCondition(() => harness.sentMessages.length === 1, "pending ask");
+    const tool = harness.tools.find((item) => item.name === "intercom")!;
+    const wrong = await tool.execute("wrong-reply-target", { action: "send", to: worker.id, replyTo: askId, message: "no" }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(wrong.details?.error, true);
+    const replied = waitForReply(planner, askId);
+    const result = await tool.execute("bound-reply", { action: "send", to: "planner", replyTo: askId, message: "yes" }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(result.details?.delivered, true);
+    assert.equal((await replied).message.content.text, "yes");
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("idle inbound asks include an exact replyTo hint", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { planner, cleanup } = await setupClients();
