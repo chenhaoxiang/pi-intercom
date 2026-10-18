@@ -4,6 +4,12 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.17.1-fork.5] - 2026-10-19
+
+- Reuse the same sender-matching predicate for in-memory and recovered durable asks, including explicit short-ID cross-checks bound by exact `replyTo`.
+- Report sender mismatches accurately after recovery, and strengthen the duplicate-name negative regression with a third-party destination.
+- Preserve the exact message ID, recipient scope and full sender ID as the routing authority; no broker or existing-session restart is required for disk installation.
+
 ## [0.17.1-fork.4] - 2026-10-19
 
 - Include exact sender IDs in ordinary inbound reply hints; duplicate display names no longer force an unnecessary roster lookup.

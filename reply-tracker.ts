@@ -7,12 +7,12 @@ export interface IntercomContext {
   receivedAt: number;
 }
 
-function matchesPendingSender(context: IntercomContext, to: string): boolean {
-  if (context.from.id === to || context.from.id.startsWith(to)) {
+export function matchesPendingSender(from: Pick<SessionInfo, "id" | "name">, to: string): boolean {
+  if (from.id === to || from.id.startsWith(to)) {
     return true;
   }
 
-  return context.from.name?.toLowerCase() === to.toLowerCase();
+  return from.name?.toLowerCase() === to.toLowerCase();
 }
 
 function hasPendingSenderMatch(pending: IntercomContext[], to: string): boolean {
@@ -107,7 +107,7 @@ export class ReplyTracker {
       if (!target) {
         throw new Error(`No pending ask with message ID "${options.replyTo}"`);
       }
-      if (options.to && !matchesPendingSender(target, options.to)) {
+      if (options.to && !matchesPendingSender(target.from, options.to)) {
         throw new Error(`Pending ask "${options.replyTo}" is not from "${options.to}"`);
       }
       return target;
@@ -124,7 +124,7 @@ export class ReplyTracker {
         const ordinaryContext = this.currentOrdinaryTurnContext;
         if (!hasPendingSenderMatch(pending, options.to)
           && ordinaryContext
-          && matchesPendingSender(ordinaryContext, options.to)) {
+          && matchesPendingSender(ordinaryContext.from, options.to)) {
           return ordinaryContext;
         }
         throw error;

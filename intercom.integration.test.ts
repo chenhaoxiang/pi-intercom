@@ -2642,7 +2642,7 @@ test("send with exact replyTo bypasses duplicate display names without bypassing
     assert.equal((await planner.send(worker.id, { messageId: askId, text: "Please answer", expectsReply: true })).delivered, true);
     await waitForCondition(() => harness.sentMessages.length === 1, "pending ask");
     const tool = harness.tools.find((item) => item.name === "intercom")!;
-    const wrong = await tool.execute("wrong-reply-target", { action: "send", to: worker.id, replyTo: askId, message: "no" }, new AbortController().signal, undefined, harness.ctx);
+    const wrong = await tool.execute("wrong-reply-target", { action: "send", to: orchestrator.sessionId, replyTo: askId, message: "no" }, new AbortController().signal, undefined, harness.ctx);
     assert.equal(wrong.details?.error, true);
     const replied = waitForReply(planner, askId);
     const result = await tool.execute("bound-reply", { action: "send", to: "planner", replyTo: askId, message: "yes" }, new AbortController().signal, undefined, harness.ctx);
@@ -4021,9 +4021,15 @@ test("intercom reply uses an exact durable ask after the receiver session restar
     piIntercomExtension(harness.pi as never);
     await harness.emitLifecycle("session_start");
     const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const wrong = await intercomTool.execute("durable-wrong-sender", {
+      action: "reply", to: "unrelated-session", replyTo: askId, message: "Must not be sent.",
+    }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(wrong.details?.error, true);
+    assert.match(wrong.content[0]?.text ?? "", /is not from/);
     const reply = waitForReply(replacementPlanner, askId);
     const result = await intercomTool.execute("durable-reply-action", {
       action: "reply",
+      to: plannerId.slice(0, 8),
       replyTo: askId,
       message: "Recovered answer.",
     }, new AbortController().signal, undefined, harness.ctx);

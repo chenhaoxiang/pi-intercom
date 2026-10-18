@@ -29,7 +29,7 @@ import {
   type IntercomOutboxResultV1,
   type IntercomSessionIdentityRequestV1,
 } from "./extension-api.ts";
-import { ReplyTracker, type IntercomContext } from "./reply-tracker.ts";
+import { matchesPendingSender, ReplyTracker, type IntercomContext } from "./reply-tracker.ts";
 import { homedir } from "node:os";
 import { join as joinPath, resolve as resolvePath } from "node:path";
 import { sameCwd } from "./cwd.ts";
@@ -731,12 +731,12 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       }
       const currentId = activeClient.sessionId;
       const ask = durableAsks.find((candidate) => candidate.messageId === options.replyTo
-        && candidate.target.sessionId === currentId
-        && (!options.to
-          || candidate.asker.sessionId === options.to
-          || candidate.asker.name?.toLowerCase() === options.to.toLowerCase()));
+        && candidate.target.sessionId === currentId);
       if (!ask) {
         throw trackerError;
+      }
+      if (options.to && !matchesPendingSender({ id: ask.asker.sessionId, name: ask.asker.name ?? undefined }, options.to)) {
+        throw new Error(`Pending ask "${options.replyTo}" is not from "${options.to}"`);
       }
       return {
         from: {
