@@ -5896,3 +5896,112 @@ test("failed delivery from an inferred reply preserves the pending ask", { concu
     await cleanup();
   }
 });
+
+test("legacy unmarked sends wake a reply-driven receiver once without inventing an ask", { concurrency: false }, async () => {
+  await withIntercomConfig({ inboundTrigger: "replies" }, async () => {
+    const { default: register } = await import("./index.ts");
+    const fixture = await setupClients();
+    const harness = createExtensionHarness("legacy-wake-worker", { hasUI: true });
+    const legacy = await connectRawRegistered("legacy-sender", "legacy-sender");
+    try {
+      register(harness.pi as never);
+      await harness.emitLifecycle("session_start");
+      const receiver = await waitForSessionByName(fixture.planner, "legacy-wake-worker");
+      const send = () => legacy.writeMessage(legacy.socket, {
+        type: "send", to: receiver.id,
+        message: { id: "legacy-unmarked-task", timestamp: 1, content: { text: "Continue the assigned task" } },
+      });
+      send();
+      await waitForCondition(() => harness.sentMessages.length === 1, "legacy task injection");
+      assert.equal((harness.sentMessages[0].message.details as { message: Message }).message.wake, undefined);
+      assert.deepEqual(harness.userMessages, ["New intercom message above."], "omitted wake retains the pre-upgrade sender contract");
+      assert.deepEqual(await fixture.planner.listPendingAsks(), [], "legacy compatibility must not manufacture a blocking ask");
+      await harness.emitLifecycle("agent_start");
+      await harness.emitLifecycle("agent_end");
+      send();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      assert.equal(harness.sentMessages.length, 1, "legacy replay is still deduplicated");
+      assert.equal(harness.userMessages.length, 1);
+    } finally {
+      legacy.socket.destroy();
+      await harness.emitLifecycle("session_shutdown");
+      await fixture.cleanup();
+    }
+  });
+});
+
+test("modern outbound sends distinguish quiet context from an explicit task and inferred reply", { concurrency: false }, async () => {
+  await withIntercomConfig({ inboundTrigger: "replies" }, async () => {
+    const { default: register } = await import("./index.ts");
+    const fixture = await setupClients();
+    const harness = createExtensionHarness("modern-wake-sender", { hasUI: true });
+    try {
+      register(harness.pi as never);
+      await harness.emitLifecycle("session_start");
+      const sender = await waitForSessionByName(fixture.planner, "modern-wake-sender");
+      const tool = harness.tools.find((entry) => entry.name === "intercom")!;
+      for (const wake of [undefined, true, false]) {
+        const received = once(fixture.planner, "message") as Promise<[SessionInfo, Message]>;
+        const result = await tool.execute("modern-send", {
+          action: "send", to: fixture.planner.sessionId, message: "Context or task",
+          ...(wake === undefined ? {} : { wake }),
+        }, new AbortController().signal, undefined, harness.ctx);
+        const message = (await received)[1];
+        assert.equal(message.wakeProtocol, 1, "new status sends must not look like legacy implicit tasks");
+        assert.equal(message.wake, wake);
+        assert.equal(result.details?.attention, wake ? "wake_requested" : "context_only");
+        assert.match(result.content.map((block) => block.text).join("\n"), wake ? /not.*started|not.*execution/i : /context.only/i);
+      }
+      await fixture.planner.send(sender.id, { messageId: "modern-inferred-ask", text: "Ready?", expectsReply: true });
+      await waitForCondition(() => harness.sentMessages.length === 1, "pending ask injection");
+      const received = once(fixture.planner, "message") as Promise<[SessionInfo, Message]>;
+      const reply = await tool.execute("modern-inferred-reply", {
+        action: "send", to: fixture.planner.sessionId, message: "Ready.",
+      }, new AbortController().signal, undefined, harness.ctx);
+      const message = (await received)[1];
+      assert.equal(message.replyTo, "modern-inferred-ask");
+      assert.equal(message.wake, true, "an inferred reply remains actionable");
+      assert.equal(reply.details?.attention, "wake_requested");
+    } finally {
+      await harness.emitLifecycle("session_shutdown");
+      await fixture.cleanup();
+    }
+  });
+});
+
+test("never policy suppresses legacy unmarked messages as well as explicit wake", { concurrency: false }, async () => {
+  await withIntercomConfig({ inboundTrigger: "never" }, async () => {
+    const { default: register } = await import("./index.ts");
+    const fixture = await setupClients();
+    const harness = createExtensionHarness("legacy-never-worker", { hasUI: true });
+    try {
+      register(harness.pi as never);
+      await harness.emitLifecycle("session_start");
+      const receiver = await waitForSessionByName(fixture.planner, "legacy-never-worker");
+      await fixture.planner.send(receiver.id, { text: "Legacy task" });
+      await fixture.planner.send(receiver.id, { text: "Explicit task", wake: true });
+      await waitForCondition(() => harness.sentMessages.length === 2, "never-policy injections");
+      assert.deepEqual(harness.userMessages, []);
+      assert.ok(harness.sentMessages.every((entry) => entry.options?.triggerTurn === false));
+    } finally {
+      await harness.emitLifecycle("session_shutdown");
+      await fixture.cleanup();
+    }
+  });
+});
+
+test("modern CLI status sends carry explicit wake protocol metadata", { concurrency: false }, async () => {
+  const fixture = await setupClients();
+  try {
+    const received = once(fixture.planner, "message") as Promise<[SessionInfo, Message]>;
+    const code = await runCli(["send", "--to", fixture.planner.sessionId!, "--text", "Status only"], {
+      client: new IntercomClient(), out: { write() {} }, err: { write() {} },
+    });
+    assert.equal(code, 0);
+    const message = (await received)[1];
+    assert.equal(message.wakeProtocol, 1);
+    assert.equal(message.wake, undefined);
+  } finally {
+    await fixture.cleanup();
+  }
+});

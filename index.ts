@@ -1321,7 +1321,10 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     if (config.inboundTrigger === "never" || entry.message.wake === false) return false;
     if (config.inboundTrigger === "always") return true;
     if (config.inboundTrigger === "replies") {
-      return Boolean(entry.message.wake === true || entry.message.replyTo || entry.message.expectsReply);
+      // Old senders had no explicit wake field and used send for task handoffs.
+      // Only protocol-aware ordinary sends are context-only by default.
+      return Boolean(entry.message.wake === true || entry.message.replyTo || entry.message.expectsReply
+        || entry.message.wakeProtocol === undefined);
     }
     return false;
   }
@@ -1815,7 +1818,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           });
           return {
             content: [{ type: "text", text: `Message sent to ${remoteTarget} over SSH (origin identity is SSH-asserted)` }],
-            details: { delivered: true, crossMachine: true, machine: remote.machine.label, target: remote.agent.name, trust: "ssh-asserted" },
+            details: { delivered: true, attention: request.wake !== false && (request.wake === true || request.handover) ? "wake_requested" : "context_only", crossMachine: true, machine: remote.machine.label, target: remote.agent.name, trust: "ssh-asserted" },
           };
         } catch (remoteError) {
           return {
@@ -1866,7 +1869,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         replyTo: effectiveReplyTo,
         supersedes,
         retryOf,
-        ...(request.wake !== undefined || request.handover ? { wake: request.wake ?? true } : {}),
+        ...(request.wake !== undefined || request.handover || effectiveReplyTo ? { wake: request.wake ?? true } : {}),
       });
       if (!result.delivered) {
         return {
@@ -1876,7 +1879,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       }
       pi.appendEntry("intercom_sent", {
         to: targetDisplay,
-        message: { text: message, attachments, replyTo: effectiveReplyTo, supersedes, retryOf },
+        message: { text: message, attachments, replyTo: effectiveReplyTo, supersedes, retryOf, wakeProtocol: 1, wake: request.wake ?? (request.handover || effectiveReplyTo ? true : undefined) },
         messageId: result.id,
         timestamp: Date.now(),
       });
@@ -1889,9 +1892,15 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           text: target.projectPane
             ? `Opened Herdr project pane ${target.projectPane.paneId} for ${target.projectPane.projectRoot} and sent message to ${targetDisplay}`
             : inferredAsk ? `Reply sent to ${targetDisplay} (inferred from pending ask)` : `Message sent to ${targetDisplay}`,
+        }, {
+          type: "text",
+          text: request.wake !== false && (request.wake === true || request.handover || effectiveReplyTo)
+            ? "Wake requested; transport delivery is not proof that the receiver started execution. Receiver policy remains authoritative."
+            : "Context-only intent: no response requested. To delegate a task use wake: true or ask; delivery is not an opening acknowledgement.",
         }],
         details: {
           ...deliveryDetails(result),
+          attention: request.wake !== false && (request.wake === true || request.handover || effectiveReplyTo) ? "wake_requested" : "context_only",
           ...(effectiveReplyTo ? { replyTo: effectiveReplyTo } : {}),
           ...(target.projectPane ? { openedProjectPane: true, paneId: target.projectPane.paneId, projectRoot: target.projectPane.projectRoot } : {}),
         },
@@ -2860,7 +2869,10 @@ Usage:
             });
             return {
               content: [{ type: "text", text: `**Reply from ${targetDisplay}:**\n${replyText}${replyAttachments}` }],
-              details: target.projectPane ? { openedProjectPane: true, paneId: target.projectPane.paneId, projectRoot: target.projectPane.projectRoot } : {},
+              details: {
+                attention: "wake_requested",
+                ...(target.projectPane ? { openedProjectPane: true, paneId: target.projectPane.paneId, projectRoot: target.projectPane.projectRoot } : {}),
+              },
             };
           } catch (error) {
             rejectReplyWaiter(toError(error));
@@ -2898,6 +2910,7 @@ Usage:
             const result = await connectedClient.send(target.from.id, {
               text: message,
               attachments,
+              wake: true,
               ...(pendingReplyTo ? { replyTo: pendingReplyTo } : {}),
             });
             if (!result.delivered) {
@@ -2920,7 +2933,7 @@ Usage:
             });
             return {
               content: [{ type: "text", text: pendingReplyTo ? `Reply sent to ${target.from.name || target.from.id}` : `Response sent to ${target.from.name || target.from.id}` }],
-              details: { ...deliveryDetails(result), ...(pendingReplyTo ? { replyTo: pendingReplyTo } : {}) },
+              details: { attention: "wake_requested", ...deliveryDetails(result), ...(pendingReplyTo ? { replyTo: pendingReplyTo } : {}) },
             };
           } catch (error) {
             return {

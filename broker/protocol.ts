@@ -161,6 +161,10 @@ export function isMessage(value: unknown): value is Message {
     return false;
   }
 
+  if (value.wakeProtocol !== undefined && value.wakeProtocol !== 1) {
+    return false;
+  }
+
   if (value.wake !== undefined && typeof value.wake !== "boolean") {
     return false;
   }
@@ -188,6 +192,7 @@ export function messageDeliveryFingerprint(message: Message, targetId: string): 
     attachments: message.content.attachments,
     replyTo: message.replyTo,
     expectsReply: message.expectsReply,
+    wakeProtocol: message.wakeProtocol,
     wake: message.wake,
     supersedes: message.supersedes,
     retryOf: message.retryOf,

@@ -4,6 +4,12 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.17.1-fork.3] - 2026-10-18
+
+- Restore implicit task wake for pre-protocol senders; new clients stamp each message with `wakeProtocol: 1`, keeping modern ordinary status messages quiet.
+- Preserve explicit `wake: false`, receiver `never`/`always` policies, ask/reply/handover routing and duplicate suppression. No text heuristics or fabricated pending asks.
+- Report context-only intent versus wake requests separately from transport delivery; update task examples and document mixed-version activation limits.
+
 ## [0.17.1-fork.2] - 2026-10-18
 
 - Default ordinary peer status to context-only; explicit asks/replies, handovers and `wake: true` still request attention.
