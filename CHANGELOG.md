@@ -4,6 +4,13 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.17.1-fork.4] - 2026-10-19
+
+- Include exact sender IDs in ordinary inbound reply hints; duplicate display names no longer force an unnecessary roster lookup.
+- Route sends with an explicit pending `replyTo` through that message's sender binding before resolving duplicate names. Unbound ambiguous destinations are never guessed.
+- Show full session IDs in duplicate-name compose labels instead of collision-prone eight-character prefixes.
+- Preserve context-only/wake semantics, scope isolation, broker lifecycle and existing-session activation boundaries.
+
 ## [0.17.1-fork.3] - 2026-10-18
 
 - Restore implicit task wake for pre-protocol senders; new clients stamp each message with `wakeProtocol: 1`, keeping modern ordinary status messages quiet.
