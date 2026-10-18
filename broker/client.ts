@@ -702,6 +702,9 @@ export class IntercomClient extends EventEmitter {
       retryOf: options.retryOf,
       replyTo: options.replyTo,
       expectsReply: options.expectsReply,
+      // Per-message metadata survives even a legacy broker's spread-forwarding.
+      // Missing means a pre-protocol sender, not a modern context-only send.
+      wakeProtocol: 1,
       ...(options.wake !== undefined ? { wake: options.wake } : {}),
       provenance: options.provenance,
       crossMachine: options.crossMachine,

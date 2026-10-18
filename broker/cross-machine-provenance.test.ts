@@ -58,6 +58,18 @@ test("wake is a validated authored field in replay identity", () => {
   assert.equal(new Set(fingerprints).size, 3, "same ID cannot change the wake semantics under replay");
 });
 
+test("wake protocol metadata validates legacy and modern messages without replay ambiguity", () => {
+  const message = messageWith(provenance) as Message;
+  assert.equal(isMessage(message), true);
+  assert.equal(isMessage({ ...message, wakeProtocol: 1 }), true);
+  for (const wakeProtocol of [null, 0, 2, "1", false, {}]) {
+    assert.equal(isMessage({ ...message, wakeProtocol }), false);
+  }
+  assert.notEqual(messageDeliveryFingerprint(message, "receiver-session"),
+    messageDeliveryFingerprint({ ...message, wakeProtocol: 1 }, "receiver-session"),
+    "legacy and modern defaults have different attention semantics");
+});
+
 test("broker replay fingerprints distinguish every asserted origin field", () => {
   const message = messageWith(provenance) as Message;
   const original = messageDeliveryFingerprint(message, "receiver-session");

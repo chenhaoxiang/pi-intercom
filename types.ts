@@ -110,6 +110,8 @@ export interface Message {
   retryOf?: string;
   replyTo?: string;
   expectsReply?: boolean;
+  /** Sender understands explicit wake semantics; absent retains legacy implicit wake. */
+  wakeProtocol?: 1;
   /** Explicitly request a receiver turn for a task handoff, or suppress one for a status notice. */
   wake?: boolean;
   provenance?: MessageProvenance;

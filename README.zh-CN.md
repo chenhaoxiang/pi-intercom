@@ -10,7 +10,7 @@
 
 ## 发布版本与分支约定
 
-本变更源码候选版本为 **0.17.1-fork.2**；变更前最近已核验的已发布维护版本为 **0.17.1-fork.1**，基于社区 **0.17.1**。fork 版本统一使用 `<社区版本>-fork.<修订号>`，本地修订不冒充社区新版本。
+本变更源码候选版本为 **0.17.1-fork.3**；变更前最近已核验的已发布维护版本为 **0.17.1-fork.2**，基于社区 **0.17.1**。fork 版本统一使用 `<社区版本>-fork.<修订号>`，本地修订不冒充社区新版本。
 
 - `main`：我们的维护、整合与发布主线，保留 fork 修复。
 - `upstream-main`：仅镜像社区 `main`，不加入 fork 提交，也不作为安装来源。
@@ -19,7 +19,7 @@
 固定版本安装：
 
 ```bash
-pi install git:github.com/chenhaoxiang/pi-intercom@v0.17.1-fork.1
+pi install git:github.com/chenhaoxiang/pi-intercom@v0.17.1-fork.2
 ```
 
 [GitHub Releases](https://github.com/chenhaoxiang/pi-intercom/releases) 提供可安装的包、来源清单和 `SHA256SUMS` 校验文件；这不是向上游作者的 npm 命名空间发布。发布及制品安装流程见[维护说明](docs/releasing.md)。
@@ -50,7 +50,7 @@ pi install git:github.com/chenhaoxiang/pi-intercom@<reviewed-commit>
 
 ```ts
 intercom({ action: "list" })
-intercom({ action: "send", to: "worker", message: "请检查解析器的边界情况。" })
+intercom({ action: "send", to: "worker", message: "请检查解析器的边界情况。", wake: true })
 intercom({ action: "ask", to: "planner", message: "哪些兼容行为必须保留？" })
 intercom({ action: "reply", replyTo: "message-id", message: "保留现有行为，并补一条回归测试。" })
 intercom({ action: "status" })
@@ -115,7 +115,8 @@ broker 首次使用时自动启动，空闲一段时间后退出，并受启动�
 }
 ```
 
-- `inboundTrigger`：默认是 `replies`；`always` 保留旧的“每条消息都唤醒”行为，`never` 关闭自动回合。普通 `send` 默认只作为上下文，不会唤醒；需要任务关注时显式传 `wake: true`，ask/reply 仍会唤醒；
+- `inboundTrigger`：默认是 `replies`；`always` 保留旧的“每条消息都唤醒”行为，`never` 关闭自动回合。新版协议的普通 `send` 默认只作为上下文，需要任务关注时显式传 `wake: true`，ask/reply 仍会唤醒。没有协议标识的旧发送端保留隐式唤醒，避免旧任务交接被静默忽略；新客户端逐条携带 `wakeProtocol: 1`，显式 `wake: false` 优先于两种默认行为；
+- 发送结果用 `attention: "context_only"` / `"wake_requested"` 区分上下文通知与唤醒请求；传输送达或请求唤醒均不证明已开工。[混合版本兼容说明](docs/maintenance/2026-10-18-legacy-wake-compatibility.md)明确激活与回退边界；
 - `busyDelivery`：`steer` 立即交给当前提示，或 `human-first` 等待安全的 turn 边界。它只控制忙碌时的投递，不会把普通状态消息变成新任务；
 - `stableId`：可选的重启稳定会话身份；每个活跃会话使用独立值；从 0.16.x 升级且此前共用该值时，待任务结束再关闭全部 Pi 会话一次；
 - `confirmSend`：发送前是否要求 UI 确认；

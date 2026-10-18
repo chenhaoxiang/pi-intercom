@@ -10,6 +10,8 @@ This is the maintained fork of nicobailon/pi-intercom. Use an isolated worktree;
 
 ## Documentation map
 
+- `docs/maintenance/2026-10-18-legacy-wake-compatibility.md`: legacy unmarked send compatibility, modern explicit attention semantics, mixed-version validation and activation boundaries.
+
 - `docs/maintenance/2026-10-18-inbound-wake-convergence.md`: ordinary peer status is context-only, explicit asks/replies and wake requests remain actionable; native custom turns preserve source on Pi 1.3+.
 
 - `docs/maintenance/2026-10-17-community-0.17.1.md`: exact community integration, explicit ordinary reply versus pending ask semantics, queue bounds, validation and release/install boundaries.

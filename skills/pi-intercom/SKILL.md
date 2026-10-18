@@ -42,7 +42,8 @@ The most common pattern. One session holds the big picture, others do hands-on w
 intercom({
   action: "send",
   to: "worker",
-  message: "Task-3: Add retry logic to API client. Key files: src/api/client.ts. Ask if anything's unclear."
+  message: "Task-3: Add retry logic to API client. Key files: src/api/client.ts. Ask if anything's unclear.",
+  wake: true,
 })
 ```
 
@@ -103,8 +104,8 @@ const workers = ["worker-1", "worker-2", "worker-3"];
 const task = "Check for null pointer exceptions in your assigned files";
 
 // Fire-and-forget to all workers
-workers.forEach(w => 
-  intercom({ action: "send", to: w, message: task })
+workers.forEach(w =>
+  intercom({ action: "send", to: w, message: task, wake: true })
 );
 ```
 
@@ -154,7 +155,8 @@ intercom({
   action: "send",
   cwd: "/path/to/other-repo",
   openProjectPaneIfMissing: true,
-  message: "Let's discuss the workbench API ergonomics in this repo."
+  message: "Let's discuss the workbench API ergonomics in this repo.",
+  wake: true,
 })
 ```
 
@@ -316,7 +318,7 @@ const reply = await intercom({
 
 ### Use `send` for notifications
 
-Ordinary `send` is context-only under the default reply-driven policy. Do not echo receipt/status notices. For an explicit non-blocking task request use `intercom({ action: "send", to: "worker", message: "Continue the authorized task", wake: true })`. `ask`, `reply`, and `handover` already request attention; `inboundTrigger: "never"` remains authoritative.
+Protocol-aware ordinary `send` is context-only under the default reply-driven policy. Do not echo receipt/status notices. For an explicit non-blocking task request use `intercom({ action: "send", to: "worker", message: "Continue the authorized task", wake: true })`. `ask`, `reply`, and `handover` already request attention; `inboundTrigger: "never"` remains authoritative. Older senders without `wakeProtocol` retain implicit wake for compatibility. If your loaded tool has no `wake` parameter, use `ask` and request a brief opening acknowledgement instead of assuming `Message sent` means work started. Delivery and `attention: "wake_requested"` are not execution acknowledgement.
 
 When you just want to inform:
 
@@ -465,7 +467,8 @@ intercom({ action: "send", to: "planner", message: "Task-3 complete. All done." 
 intercom({
   action: "send",
   to: "worker",
-  message: "Implement user authentication. This will take 30+ minutes. I'll check in at milestones."
+  message: "Implement user authentication. This will take 30+ minutes. I'll check in at milestones.",
+  wake: true,
 });
 
 // 2. Worker sends progress via send (no timeout)
