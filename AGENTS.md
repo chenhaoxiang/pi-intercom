@@ -10,6 +10,8 @@ This is the maintained fork of nicobailon/pi-intercom. Use an isolated worktree;
 
 ## Documentation map
 
+- `docs/maintenance/2026-10-20-attention-display.md`: existing intent/receipt display, exact reply versus task completion, provider-free verification and runtime boundaries.
+
 - `docs/maintenance/2026-10-19-exact-sender-routing.md`: exact sender hints, message-bound duplicate-name replies, provider-free regressions and fork.4 activation boundaries.
 - `docs/maintenance/2026-10-19-durable-reply-sender-match.md`: fork.5 durable-recovery sender predicate and mismatch regression.
 

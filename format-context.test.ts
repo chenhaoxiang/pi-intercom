@@ -1,7 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { formatTokenCount, formatContextUsage } from "./format-context.ts";
+import { formatTokenCount, formatContextUsage, messageAttention } from "./format-context.ts";
 import type { SessionInfo } from "./types.ts";
+
+test("message attention labels only existing sender intent, never task execution", () => {
+  assert.equal(messageAttention({ wakeProtocol: 1 }), "context-only");
+  assert.equal(messageAttention({ wake: true }), "wake-requested");
+  assert.equal(messageAttention({ expectsReply: true }), "wake-requested");
+  assert.equal(messageAttention({ replyTo: "exact-message" }), "wake-requested");
+  assert.equal(messageAttention({ wake: false, expectsReply: true, replyTo: "exact-message" }), "context-only");
+  assert.equal(messageAttention({}), "unknown", "legacy unmarked intent is not inferred");
+});
 
 const base: SessionInfo = { id: "s1", cwd: "/w", model: "m", pid: 1, startedAt: 0, lastActivity: 0 };
 
