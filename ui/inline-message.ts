@@ -3,6 +3,7 @@ import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { SessionInfo, Message } from "../types.ts";
 import { relaySenderName } from "../cross-machine-envelope.ts";
+import { messageAttention } from "../format-context.ts";
 
 export class InlineMessageComponent implements Component {
   private from: SessionInfo;
@@ -49,7 +50,7 @@ export class InlineMessageComponent implements Component {
     }
     const bodyWidth = Math.max(1, width - 2);
 
-    const header = ` From: ${senderName} (${this.from.cwd}) `;
+    const header = ` From: ${senderName} (${this.from.cwd}) [${messageAttention(this.message)}] `;
     const headerText = truncateToWidth(this.collapsed ? `${header} Ctrl+O expands ` : header, bodyWidth, "");
     const headerPadding = Math.max(0, bodyWidth - visibleWidth(headerText));
     lines.push(
@@ -83,6 +84,7 @@ export class InlineMessageComponent implements Component {
       return lines;
     }
 
+    lines.push(frameLine(this.theme.fg("dim", " execution/completion unknown; reply binding is not task completion")));
     if (this.wrappedBody?.width !== bodyWidth) {
       this.wrappedBody = {
         width: bodyWidth,

@@ -122,6 +122,14 @@ test("collapsed inline intercom messages keep preview, reply hint, and expand ke
   assert.match(rendered, /1 attachment/);
 });
 
+test("inline intent and reply binding never imply task start or completion", () => {
+  for (const [fields, intent] of [[{ wakeProtocol: 1 }, "context-only"], [{ wake: true, replyTo: "exact-123" }, "wake-requested"], [{}, "unknown"]] as const) {
+    const rendered = new InlineMessageComponent(from, { ...message, ...fields }, theme as any).render(160).join("\n");
+    assert.ok(rendered.includes(`[${intent}]`));
+    assert.match(rendered, /execution\/completion unknown/);
+  }
+});
+
 const roleCodes = {
   accent: 31,
   toolTitle: 32,

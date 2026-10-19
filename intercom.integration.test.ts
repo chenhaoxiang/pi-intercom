@@ -2228,6 +2228,15 @@ test("intercom tool renders compact call and result rows", async () => {
   }, { isPartial: false, expanded: false }, renderTheme, { isError: false, expanded: false }));
   assert.match(resultText, /✓ Message sent to planner \(abcdef12\)/);
 
+  for (const attention of ["context_only", "wake_requested"] as const) {
+    const labelled = renderToText(intercomTool.renderResult({
+      content: [{ type: "text", text: "Message sent" }],
+      details: { delivered: true, attention },
+    }, { isPartial: false, expanded: false }, renderTheme, { isError: false, expanded: false }));
+    assert.ok(labelled.includes(attention === "context_only" ? "context-only" : "wake-requested"));
+    assert.match(labelled, /execution\/completion unknown/);
+  }
+
   const errorText = renderToText(intercomTool.renderResult({
     content: [{ type: "text", text: "Missing 'to' or 'message' parameter" }],
     details: { error: true, reason: "Missing target" },
@@ -2648,6 +2657,12 @@ test("send with exact replyTo bypasses duplicate display names without bypassing
     const result = await tool.execute("bound-reply", { action: "send", to: "planner", replyTo: askId, message: "yes" }, new AbortController().signal, undefined, harness.ctx);
     assert.equal(result.details?.delivered, true);
     assert.equal((await replied).message.content.text, "yes");
+    assert.equal(result.details?.execution, "unknown");
+    assert.equal(result.details?.completion, "unknown", "an exact reply is not task completion evidence");
+    const status = await tool.execute("status-receipt-unknown", { action: "status", messageId: "unobserved-message-id" }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(status.details?.receipt, "unknown");
+    assert.equal(status.details?.execution, "unknown");
+    assert.match(status.content[0]?.text ?? "", /Execution\/completion: unknown/);
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();

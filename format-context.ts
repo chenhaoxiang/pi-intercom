@@ -1,4 +1,12 @@
-import type { SessionInfo } from "./types.ts";
+import type { Message, SessionInfo } from "./types.ts";
+
+/** Sender intent only: transport/injection/reply text does not prove task execution or completion. */
+export function messageAttention(message: Pick<Message, "wake" | "wakeProtocol" | "replyTo" | "expectsReply">): "context-only" | "wake-requested" | "unknown" {
+  if (message.wake === false) return "context-only";
+  if (message.wake === true || message.replyTo || message.expectsReply) return "wake-requested";
+  return message.wakeProtocol === 1 ? "context-only" : "unknown";
+}
+
 
 // Compact token count for display: 1432 -> "1.4k", 144000 -> "144k". Keeps list
 // rows short while staying legible.

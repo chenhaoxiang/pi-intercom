@@ -33,7 +33,7 @@ import { matchesPendingSender, ReplyTracker, type IntercomContext } from "./repl
 import { homedir } from "node:os";
 import { join as joinPath, resolve as resolvePath } from "node:path";
 import { sameCwd } from "./cwd.ts";
-import { formatContextUsage } from "./format-context.ts";
+import { formatContextUsage, messageAttention } from "./format-context.ts";
 import { openProjectPane, resolveTargetInCwd, waitForProjectSession, type ProjectPaneLaunch } from "./project-agent.ts";
 import { relaySenderName } from "./cross-machine-envelope.ts";
 import { runCommand, sendCrossMachine } from "./cross-machine-transport.ts";
@@ -175,6 +175,8 @@ function deliveryDetails(result: SendResult): Record<string, unknown> {
     messageId: result.id,
     delivered: result.delivered,
     delivery: result.delivery,
+    execution: "unknown",
+    completion: "unknown",
     retryable: result.retryable,
     outcomeKnown: result.outcomeKnown,
     ...(result.code ? { code: result.code } : {}),
@@ -630,7 +632,7 @@ function formatMessageTimestamp(timestamp: number | undefined): string | undefin
   return typeof timestamp === "number" && Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : undefined;
 }
 function formatInboundDeliveryMetadata(message: Message): string {
-  const parts = [`id ${message.id}`];
+  const parts = [`id ${message.id}`, `intent ${messageAttention(message)}`, "execution/completion unknown"];
   if (typeof message.senderSequence === "number") parts.push(`seq ${message.senderSequence}`);
   if (message.supersedes) parts.push(`supersedes ${message.supersedes}`);
   if (message.retryOf) parts.push(`retry of ${message.retryOf}`);
@@ -2577,7 +2579,7 @@ Usage:
         description: "Exact inbound ask message ID from its displayed reply command. Use this when answering an ask; multiple pending asks must be disambiguated.",
       })),
       messageId: Type.Optional(Type.String({
-        description: "Message ID for actions that operate on an existing message, such as 'cancel'.",
+        description: "Message ID for cancel, or status to inspect an already-observed outbound receipt without inferring task completion.",
       })),
       supersedes: Type.Optional(Type.String({
         description: "Previous message ID this send/ask explicitly supersedes. Only works for the same sender and receiver.",
@@ -2994,12 +2996,14 @@ Usage:
             const mySessionId = connectedClient.sessionId;
             const sessions = await connectedClient.listSessions();
             const pool = getIntercomScopeId();
+            const receipt = messageId ? latestOutboundReceipts.get(messageId) : undefined;
+            const observation = messageId ? `\nMessage: ${messageId}\nReceipt: ${receipt?.status ?? "unknown"}\nExecution/completion: unknown (transport receipts are not task outcomes)` : "";
             return {
               content: [{
                 type: "text",
-                text: `**Intercom status:**\nConnected: Yes\nSession ID: ${mySessionId}${pool ? `\nPool: ${pool}` : ""}\nActive sessions: ${sessions.length}`,
+                text: `**Intercom status:**\nConnected: Yes\nSession ID: ${mySessionId}${pool ? `\nPool: ${pool}` : ""}\nActive sessions: ${sessions.length}${observation}`,
               }],
-              details: {},
+              details: messageId ? { messageId, receipt: receipt?.status ?? "unknown", execution: "unknown", completion: "unknown" } : {},
             };
           } catch (error) {
             return {
@@ -3040,7 +3044,7 @@ Usage:
       if (isPartial) {
         return new Text(theme.fg("warning", "Intercom working..."), 0, 0);
       }
-      const details = result.details as { delivered?: boolean; error?: boolean; messageId?: string; reason?: string; roster?: { peers: number; total: number; cwd?: string } } | undefined;
+      const details = result.details as { delivered?: boolean; error?: boolean; messageId?: string; attention?: "context_only" | "wake_requested"; reason?: string; roster?: { peers: number; total: number; cwd?: string } } | undefined;
       const failed = Boolean(context.isError || details?.error === true || details?.delivered === false);
       let text = failed ? theme.fg("error", "✗ ") : theme.fg("success", "✓ ");
       if (details?.roster && !failed && !context.expanded) {
@@ -3054,6 +3058,9 @@ Usage:
       text += theme.fg(failed ? "error" : "text", firstTextContent(result));
       if (details?.messageId && !context.expanded) {
         text += theme.fg("dim", ` (${details.messageId.slice(0, 8)})`);
+      }
+      if (details?.attention) {
+        text += "\n" + theme.fg("dim", `${details.attention === "context_only" ? "context-only" : "wake-requested"} · execution/completion unknown`);
       }
       if (details?.reason && context.expanded) {
         text += "\n" + theme.fg("dim", `Reason: ${details.reason}`);
