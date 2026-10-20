@@ -5393,6 +5393,82 @@ test("subagent result intercom events reach the current orchestrator session", a
   assert.deepEqual(deliveryAcks, [{ requestId: "result-1", delivered: true }]);
 });
 
+for (const event of ["subagent:result-intercom", "subagent:control-intercom"]) {
+  test(`${event} retains actionable intent across sessions without overriding receiver policy`, { concurrency: false }, async () => {
+    for (const [policy, busy] of [["replies", false], ["replies", true], ["never", false]] as const) {
+      await withIntercomConfig({ inboundTrigger: policy }, async () => {
+        const { default: register } = await import("./index.ts");
+        const fixture = await setupClients();
+        const source = createExtensionHarness("relay-source", { hasUI: true, sessionId: "relay-source-id" });
+        const target = createExtensionHarness("relay-target", {
+          hasUI: true, sessionId: "relay-target-id", isIdle: () => !busy,
+        });
+        const deliveryAcks: unknown[] = [];
+        source.pi.events.on("subagent:result-intercom-delivery", (payload) => deliveryAcks.push(payload));
+        try {
+          register(source.pi as never);
+          register(target.pi as never);
+          await source.emitLifecycle("session_start");
+          await target.emitLifecycle("session_start");
+          const receiver = await waitForSessionByName(fixture.planner, "relay-target");
+          if (busy) await target.emitLifecycle("agent_start");
+
+          await fixture.planner.send(receiver.id, { text: "Progress only" });
+          await waitForCondition(() => target.sentMessages.length === 1, "quiet progress injection");
+          assert.deepEqual(target.sentMessages[0]?.options, { triggerTurn: false });
+          assert.deepEqual(target.userMessages, [], "ordinary progress must not wake even a busy receiver");
+
+          source.pi.events.emit(event, {
+            to: receiver.id, requestId: "relay-attention", message: "Continue after this result or decision request",
+          });
+          await waitForCondition(() => target.sentMessages.length === 2, "cross-session relay injection");
+          const entry = target.sentMessages[1]!;
+          const message = (entry.message.details as { message: Message }).message;
+          assert.equal(message.wakeProtocol, 1);
+          assert.equal(message.wake, true, "an actionable relay must not become a modern context-only send");
+          assert.equal(message.expectsReply, undefined, "attention must not invent a pending ask");
+          assert.equal(message.replyTo, undefined);
+          assert.deepEqual(target.userMessages, policy === "replies" && !busy ? ["New intercom message above."] : []);
+          assert.deepEqual(entry.options, policy === "never" ? { triggerTurn: false } : busy ? { deliverAs: "steer" } : undefined);
+          assert.deepEqual(await fixture.planner.listPendingAsks(), []);
+          if (event === "subagent:result-intercom") {
+            await waitForCondition(() => deliveryAcks.length === 1, "relay transport acknowledgement");
+            assert.deepEqual(deliveryAcks, [{ requestId: "relay-attention", delivered: true }]);
+          }
+        } finally {
+          await source.emitLifecycle("session_shutdown");
+          await target.emitLifecycle("session_shutdown");
+          await fixture.cleanup();
+        }
+      });
+    }
+  });
+}
+
+test("local actionable relay respects never just like its cross-session path", { concurrency: false }, async () => {
+  await withIntercomConfig({ inboundTrigger: "never" }, async () => {
+    const { default: register } = await import("./index.ts");
+    const fixture = await setupClients();
+    const harness = createExtensionHarness("local-never-relay", { hasUI: true });
+    try {
+      register(harness.pi as never);
+      await harness.emitLifecycle("session_start");
+      harness.pi.events.emit("subagent:result-intercom", {
+        to: "local-never-relay", requestId: "never-result", message: "Result ready",
+      });
+      await waitForCondition(() => harness.sentMessages.length === 1, "local never relay injection");
+      assert.deepEqual(harness.userMessages, [], "local routing is not permission to bypass never");
+      assert.deepEqual(harness.sentMessages[0]?.options, { triggerTurn: false });
+      const message = (harness.sentMessages[0]?.message.details as { message: Message }).message;
+      assert.equal(message.wakeProtocol, 1);
+      assert.equal(message.wake, true, "sender intent is separate from receiver policy");
+    } finally {
+      await harness.emitLifecycle("session_shutdown");
+      await fixture.cleanup();
+    }
+  });
+});
+
 test("subagent relay events wake an idle orchestrator and steer a busy one", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { cleanup } = await setupClients();
