@@ -1316,10 +1316,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       }
     })();
   }
-  function shouldTriggerInboundMessage(entry: InboundMessageEntry, forceTrigger = false): boolean {
-    if (forceTrigger) {
-      return true;
-    }
+  function shouldTriggerInboundMessage(entry: InboundMessageEntry): boolean {
     if (config.inboundTrigger === "never" || entry.message.wake === false) return false;
     if (config.inboundTrigger === "always") return true;
     if (config.inboundTrigger === "replies") {
@@ -1330,7 +1327,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     }
     return false;
   }
-  function sendIncomingMessage(entry: InboundMessageEntry, delivery: "trigger" | "steer", generation = runtimeGeneration, forceTrigger = false): void {
+  function sendIncomingMessage(entry: InboundMessageEntry, delivery: "trigger" | "steer", generation = runtimeGeneration): void {
     if (runtimeStarted && !getLiveContext(runtimeContext, generation)) {
       return;
     }
@@ -1343,7 +1340,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       : entry.from.name || entry.from.id.slice(0, 8);
     const replyInstruction = replyCommand ? `\n\nTo reply, use the intercom tool: ${replyCommand}` : "";
     const deliveryMetadata = formatInboundDeliveryMetadata(injectedMessage);
-    const actionable = shouldTriggerInboundMessage(entry, forceTrigger);
+    const actionable = shouldTriggerInboundMessage(entry);
     const trigger = delivery === "trigger" && actionable;
     const native = supportsNativeCustomTurns();
     const wakeContext = trigger ? getLiveContext(runtimeContext, generation) : undefined;
@@ -1960,10 +1957,12 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       message: {
         id: randomUUID(),
         timestamp: now,
+        wakeProtocol: 1,
+        wake: true,
         content: { text: messageText },
       },
       bodyText: messageText,
-    }, "trigger", runtimeGeneration, true);
+    }, "trigger", runtimeGeneration);
   }
   function recordSubagentDeliveryError(entryType: string, to: string, message: string, error: unknown): void {
     pi.appendEntry(entryType, {
@@ -2078,7 +2077,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       }
 
       try {
-        const result = await activeClient.send(target, { text: parsed.message });
+        // Results and decision requests retain the local relay's actionable intent.
+        const result = await activeClient.send(target, { text: parsed.message, wake: true });
         if (!relayStillLive()) return;
         if (!result.delivered) {
           const error = new Error(result.reason ?? "Session may not exist or has disconnected.");

@@ -4,6 +4,16 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.17.1-fork.7] - 2026-10-20
+
+- Preserve explicit wake intent when existing result/decision relays target another session; modern relay results no longer silently become context-only notices.
+- Route local relays through the same receiver policy instead of bypassing `inboundTrigger: "never"`. Ordinary notifications remain quiet; no broker, core or subagent executor changes.
+- Add provider-free red/green regressions and an optional installed-Pi native-turn smoke covering starting/settling, both busy-delivery policies, duplicate suppression and retained broker compatibility.
+
+## [0.17.1-fork.6] - 2026-10-20
+
+- Display existing attention intent and transport receipts without inventing task start or completion; preserve exact reply binding and wake semantics.
+
 ## [0.17.1-fork.5] - 2026-10-19
 
 - Reuse the same sender-matching predicate for in-memory and recovered durable asks, including explicit short-ID cross-checks bound by exact `replyTo`.
