@@ -120,21 +120,29 @@ try {
   await wait(() => ready, "owned fixture broker");
   await sender.connect({ name: "native-fixture-sender", cwd: root, model: "none", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() });
   const target = await worker("native-target");
+  const observed = {};
   const sourceWorker = await worker("relay-source");
   const relay = (event, to, text) => sourceWorker.api.events.emit(event, { to: to.id, requestId: text, message: text });
   await sender.send(target.id, { messageId: "quiet", text: "quiet-only" });
   await wait(() => receipts.get("quiet") === "injected", "quiet injection");
-  assert.equal(target.calls.length, 0);
+  observed.quietTurns = target.calls.length;
+  assert.equal(observed.quietTurns, 0);
   await sender.send(target.id, { messageId: "explicit", text: "explicit-task", wake: true });
   await finish(target, 1);
   await sender.send(target.id, { messageId: "explicit", text: "explicit-task", wake: true });
   await sender.send(target.id, { messageId: "quiet-again", text: "quiet-again", wake: false });
   await wait(() => receipts.get("quiet-again") === "injected", "duplicate/quiet barrier");
-  assert.equal(target.calls.length, 1, "duplicate and explicit quiet must not start turns");
+  observed.duplicateAndExplicitQuietTurns = target.calls.length - 1;
+  assert.equal(observed.duplicateAndExplicitQuietTurns, 0, "duplicate and explicit quiet must not start turns");
+  observed.relayTurns = {};
   for (const [index, event] of ["subagent:result-intercom", "subagent:control-intercom"].entries()) {
+    const before = target.calls.length;
     relay(event, target, event);
     await finish(target, index + 2);
     assert.ok(consumed(target, event), "remote actionable follow-up reached a model input");
+    observed.relayTurns[event] = target.calls.length - before;
+    assert.equal(observed.relayTurns[event], 1);
+    assert.equal(custom(target, event).length, 1);
   }
   const preflight = pause();
   target.preflight = preflight;
@@ -145,7 +153,8 @@ try {
   preflight.release();
   await wait(() => consumed(target, "starting-second") && target.session.isIdle, "starting peer consumed");
   assert.ok(consumed(target, "starting-first"));
-  assert.equal(custom(target, "starting-second").length, 1);
+  observed.startingPeerInjections = custom(target, "starting-second").length;
+  assert.equal(observed.startingPeerInjections, 1);
 
   const settling = pause();
   target.settling = settling;
@@ -157,8 +166,12 @@ try {
   assert.equal(target.session.isStreaming, true, "session remains busy during settling");
   settling.release();
   await wait(() => consumed(target, "settling-follow-up") && target.session.isIdle, "settling follow-up consumed");
-  assert.equal(target.calls.length, beforeSettleCalls + 2);
+  observed.settlingTotalCalls = target.calls.length - beforeSettleCalls;
+  observed.settlingFollowUpInjections = custom(target, "settling-follow-up").length;
+  assert.equal(observed.settlingTotalCalls, 2);
+  assert.equal(observed.settlingFollowUpInjections, 1);
 
+  observed.toolBatchPolicies = [];
   for (const busyDelivery of ["steer", "human-first"]) {
     const busy = await worker(`batch-${busyDelivery}`, "replies", busyDelivery);
     const toolPause = pause();
@@ -174,6 +187,7 @@ try {
     await wait(() => consumed(busy, `batch-result-${busyDelivery}`) && busy.session.isIdle, "tool-batch follow-up consumed");
     assert.equal(custom(busy, `batch-result-${busyDelivery}`).length, 1);
     assert.deepEqual(busy.starts, ["custom"], "busy result continues the existing run rather than waking another");
+    observed.toolBatchPolicies.push(busyDelivery);
   }
 
   const never = await worker("never-target", "never");
@@ -182,15 +196,17 @@ try {
   await sender.send(never.id, { messageId: "never-explicit", text: "never-explicit", wake: true });
   await wait(() => custom(never, "never-remote-result").length === 1 && receipts.get("never-explicit") === "injected", "never-policy injections");
   assert.equal(custom(never, "never-local-control").length, 1);
-  assert.equal(never.calls.length, 0);
+  observed.neverTurns = never.calls.length;
+  assert.equal(observed.neverTurns, 0);
   for (const entry of workers) {
     assert.ok(entry.starts.every((type) => type === "custom"), "native source must remain custom");
     assert.equal(entry.session.messages.filter((message) => message.role === "user").length, 0, "no synthetic user wake");
   }
-  console.log(JSON.stringify({ host: core.VERSION, source, brokerSource, passed: true, realProviderCalls: 0,
-    quietTurns: 0, duplicateTurns: 0, remoteResultTurns: 1, remoteControlTurns: 1, neverTurns: 0,
-    startingPeerConsumedOnce: true, settlingFollowUpConsumedOnce: true, toolBatchPolicies: ["steer", "human-first"],
-    nativeCustomOnly: true, workers: workers.map(({ name, calls, starts }) => ({ name, calls: calls.length, starts })),
+  console.log(JSON.stringify({ host: core.VERSION, source, brokerSource, passed: true,
+    providerMode: "local faux provider only; no network model provider configured", observed,
+    nativeCustomOnly: workers.every(({ starts }) => starts.every((type) => type === "custom")),
+    syntheticUserMessages: workers.reduce((sum, { session }) => sum + session.messages.filter((message) => message.role === "user").length, 0),
+    workers: workers.map(({ name, calls, starts }) => ({ name, calls: calls.length, starts })),
   }, null, 2));
 } finally {
   for (const gate of gates) gate.release();
