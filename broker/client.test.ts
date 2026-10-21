@@ -35,6 +35,14 @@ test("registered feature negotiation rejects non-string feature entries", () => 
   );
 });
 
+test("broker runtime report is optional and is not inferred from the client package", () => {
+  for (const [reported, expected] of [[undefined, undefined], ["0.18.0-fork.2", "0.18.0-fork.2"], ["bad\nversion", undefined]]) {
+    const client = new IntercomClient();
+    (client as any).handleBrokerMessage({ type: "registered", sessionId: "fixture", brokerVersion: reported });
+    assert.equal(client.brokerVersion, expected);
+  }
+});
+
 test("malformed extension broker messages are rejected", () => {
   const client = new IntercomClient();
   (client as any)._sessionId = "session-1";

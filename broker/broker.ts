@@ -21,6 +21,7 @@ import { sameCwd } from "../cwd.ts";
 import { EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, PENDING_ASKS_FEATURE, SESSION_HELD_ERROR_CODE } from "../types.ts";
 import type { DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl, PendingAsk, MessageReceiptStatus } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
+import { LOADED_INTERCOM_VERSION } from "../runtime-version.ts";
 import { assertNoLiveBroker } from "./runtime-claim.ts";
 import { resolveHerdrLocations } from "../herdr-location.ts";
 
@@ -543,6 +544,7 @@ class IntercomBroker {
         const info: SessionInfo = {
           id,
           endpointEpoch: randomUUID(),
+          ...(session.intercomVersion ? { intercomVersion: session.intercomVersion } : {}),
           ...(session.name !== undefined ? { name: session.name } : {}),
           ...(session.runtimeFallbackAlias !== undefined ? { runtimeFallbackAlias: session.runtimeFallbackAlias } : {}),
           cwd: session.cwd,
@@ -583,6 +585,7 @@ class IntercomBroker {
         writeMessage(socket, {
           type: "registered",
           sessionId: id,
+          brokerVersion: LOADED_INTERCOM_VERSION,
           features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, PENDING_ASKS_FEATURE],
         });
         this.broadcast({ type: "session_joined", session: info }, key, scopeId);

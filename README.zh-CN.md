@@ -10,7 +10,7 @@
 
 ## 发布版本与分支约定
 
-本维护源码候选为 **0.18.0-fork.1**（已发布回退基线 **0.17.1-fork.7**），基于社区 **0.18.0**；安装前核对同版本不可变 Release。fork 版本统一使用 `<社区版本>-fork.<修订号>`，本地修订不冒充社区新版本。
+本维护源码候选为 **0.18.0-fork.2**（已发布回退基线 **0.17.1-fork.7**），基于社区 **0.18.0**；安装前核对同版本不可变 Release。fork 版本统一使用 `<社区版本>-fork.<修订号>`，本地修订不冒充社区新版本。
 
 - `main`：我们的维护、整合与发布主线，保留 fork 修复。
 - `upstream-main`：仅镜像社区 `main`，不加入 fork 提交，也不作为安装来源。
@@ -19,7 +19,7 @@
 固定版本安装：
 
 ```bash
-pi install git:github.com/chenhaoxiang/pi-intercom@v0.18.0-fork.1
+pi install git:github.com/chenhaoxiang/pi-intercom@v0.18.0-fork.2
 ```
 
 [GitHub Releases](https://github.com/chenhaoxiang/pi-intercom/releases) 提供可安装的包、来源清单和 `SHA256SUMS` 校验文件；这不是向上游作者的 npm 命名空间发布。发布及制品安装流程见[维护说明](docs/releasing.md)。
@@ -63,6 +63,14 @@ intercom({ action: "status" })
 ```ts
 intercom({ action: "handover", to: "worker", message: "继续当前计划，并核对剩余测试。" })
 ```
+
+## 运行版本与安全升级
+
+`list` / `list-cwd` 展示对端自己报告的 Intercom 已加载版本；`status` 区分本会话扩展和独立 broker 进程。旧端或旧 broker 不报版本时显示“未知”，不据此断言已升级或落后。普通消息携带可选版本字段，正文、消息 ID、回复绑定和 wake 语义不变。
+
+本地已有工具调用或收到消息时，若观察到更高的本地选择/对端报告版本，可给出一次有界建议，不额外唤醒模型。发送方也可得到一次提示，用普通已授权 Intercom 消息请较旧/未知对端的 AI 核对自身版本，优先在安全空闲点统一新版。不要打断当前任务和子任务，不反复催促；修改磁盘安装、消息送达均不是热更新完成证据。此处只报告 Intercom，其他扩展需要各自证据。
+
+不自动安装、reload、重启或后台轮询；对端版本声明不增加操作权限。健康的旧共享 broker 会继续复用，磁盘升级不会让其邮箱存活修复立即生效；broker 切换必须另有协调的空闲窗口，不能由一条 peer 消息强制触发。
 
 ## Fork 维护内容
 

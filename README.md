@@ -10,7 +10,7 @@ Direct 1:1 messaging between Pi sessions on the same machine. This repository is
 
 ## Releases and branch policy
 
-This maintained source prepares **0.18.0-fork.1** (published rollback baseline **0.17.1-fork.7**), based on community **0.18.0**; verify the matching immutable Release before installation. Fork releases use `<community-version>-fork.<revision>`; the fork revision increases without pretending to be a new upstream release.
+This maintained source prepares **0.18.0-fork.2** (published rollback baseline **0.17.1-fork.7**), based on community **0.18.0**; verify the matching immutable Release before installation. Fork releases use `<community-version>-fork.<revision>`; the fork revision increases without pretending to be a new upstream release.
 
 - `main`: our maintained integration and release branch, including fork fixes.
 - `upstream-main`: an exact mirror of the community's `main`, with no fork commits. Never install from this branch.
@@ -19,7 +19,7 @@ This maintained source prepares **0.18.0-fork.1** (published rollback baseline *
 Install a reproducible release:
 
 ```bash
-pi install git:github.com/chenhaoxiang/pi-intercom@v0.18.0-fork.1
+pi install git:github.com/chenhaoxiang/pi-intercom@v0.18.0-fork.2
 ```
 
 [GitHub Releases](https://github.com/chenhaoxiang/pi-intercom/releases) include the installable package tarball, a provenance manifest, and `SHA256SUMS`. These GitHub releases are not npm publications under the upstream author's namespace. See [release maintenance](docs/releasing.md) for asset installation and future releases.
@@ -63,6 +63,14 @@ For a handoff, use the overlay's `h` key or:
 ```ts
 intercom({ action: "handover", to: "worker", message: "Continue from the current plan and verify the remaining tests." })
 ```
+
+## Runtime versions and safe convergence
+
+`list` / `list-cwd` show self-reported loaded Intercom versions; `status` distinguishes this extension from the separate broker runtime. Old clients/brokers may report no version: that is **unknown**, not proof they are current or old. Authored messages carry additive version metadata without changing their text or wake intent, including through retained legacy brokers.
+
+At an existing tool invocation or inbound message, a newer selected/peer-reported version can produce one bounded local advice, never another model turn. The sender may also receive a one-time hint to ask an older/unknown peer AI to check its runtime through one ordinary authorized message. Prefer the reviewed current installation, but preserve active work/children and arrange reload/restart only at a safe idle point. Reports are advisory, not update authority or proof of hot loading. No automatic install/reload, background version polling or broker termination is added. Other packages need their own version evidence.
+
+A healthy legacy shared broker is deliberately reused; new source on disk does not activate its mailbox-lifetime fix. A coordinated idle restart remains a separate operation, not something a peer message may force.
 
 ## What the fork maintains
 

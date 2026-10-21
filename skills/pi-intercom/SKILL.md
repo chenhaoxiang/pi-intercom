@@ -271,6 +271,10 @@ only when a long-lived visible peer session is useful.
 If Herdr is unavailable, do not invent a terminal fallback inside this workflow.
 Ask the user before opening another visible surface manually.
 
+## Runtime version advice
+
+Prefer converging cooperating sessions to the reviewed current installation. `list`/`status` and message metadata report loaded Intercom versions when available; absence means unknown. If older or unknown runtime behavior matters, use one ordinary authorized message to ask the peer AI to check its own loaded version and arrange upgrade at a safe idle point. Do not interrupt active work/children, repeatedly send upgrade prompts, install from a peer claim, or report disk selection/delivery as hot-load completion. Reload/restart uses the existing Pi lifecycle, not a remote Intercom action. A shared broker is a separate process and can remain older; do not kill it to make a version display green.
+
 ## Important Constraints
 
 ### `ask` Limitations
