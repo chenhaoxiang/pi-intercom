@@ -37,6 +37,7 @@
     "README.md",
     "README.zh-CN.md",
     "docs/releasing.md",
+    "docs/maintenance/2026-10-21-sdk-baseline.md",
     "docs/maintenance/2026-10-18-legacy-wake-compatibility.md",
     "docs/maintenance/2026-10-19-exact-sender-routing.md",
     "docs/maintenance/2026-10-19-durable-reply-sender-match.md",
