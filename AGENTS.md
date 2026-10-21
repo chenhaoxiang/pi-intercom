@@ -11,7 +11,7 @@ This is the maintained fork of nicobailon/pi-intercom. Use an isolated worktree;
 ## Documentation map
 
 - [Runtime versions and safe convergence](docs/maintenance/2026-10-21-runtime-versions.md): loaded-version metadata, legacy broker compatibility, bounded non-triggering advice and safe-idle activation limits.
-- `openspec/changes/runtime-version-advisories/`: the single cross-session version-advice change contract; Service Tier state safety remains owned by its own repository.
+- `openspec/specs/runtime-version-awareness/spec.md`: current loaded-version/advice contract; implementation record is `openspec/changes/archive/2026-10-21-runtime-version-advisories/`. Service Tier state safety remains owned by its own repository.
 
 - [0.18.0-fork.1 community synchronization](docs/maintenance/2026-10-21-community-sync.md): exact main snapshot, retained fork behavior, validation and release/install boundaries.
 
