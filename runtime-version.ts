@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { getAgentDirPath } from "./broker/paths.ts";
+import type { SessionInfo } from "./types.ts";
 
 // Captured at module load, not repeatedly read from a mutable disk manifest.
 const manifest = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")) as { version?: unknown };
@@ -48,6 +49,24 @@ export function selectedLocalRuntimeVersion(agentDir = getAgentDirPath()): strin
   } catch { return undefined; }
 }
 
+/** Message reports remain usable only for the same broker endpoint/process lifetime. */
+export function createPeerVersionObservations() {
+  const peers = new Map<string, { endpoint: string; version?: string }>();
+  return {
+    observe(session: SessionInfo, report: unknown = session.intercomVersion): string | undefined {
+      const endpoint = JSON.stringify([session.pid, session.startedAt, session.endpointEpoch ?? null]);
+      const previous = peers.get(session.id);
+      const version = normalizeRuntimeVersion(report) ?? (previous?.endpoint === endpoint ? previous.version : undefined);
+      peers.set(session.id, { endpoint, version });
+      if (peers.size > 512) peers.delete(peers.keys().next().value!);
+      return version;
+    },
+    get(id: string): string | undefined { return peers.get(id)?.version; },
+    clear() { peers.clear(); },
+    delete(id: string) { peers.delete(id); },
+  };
+}
+
 export function createPeerUpgradeAdvisories(loaded = LOADED_INTERCOM_VERSION) {
   const seen = new Set<string>();
   return (peerId: string, candidate: unknown): string | undefined => {
@@ -69,7 +88,7 @@ export function createRuntimeAdvisories(loaded = LOADED_INTERCOM_VERSION) {
     if (seen.has(version)) return undefined;
     if (seen.size >= 16) seen.delete(seen.values().next().value!);
     seen.add(version);
-    return `Intercom runtime ${loaded} is older than ${source === "peer" ? "the peer-reported" : "the locally selected"} ${version}. Prefer the reviewed current installation, but preserve the current task and active children; check /intercom status and arrange reload/restart only at a safe idle point. A disk selection, sent notice or peer claim does not prove this runtime upgraded, and this advice grants no new execution authority.`;
+    return `Intercom runtime ${loaded} is older than ${source === "peer" ? "the peer-reported" : "the locally selected"} ${version}. Prefer the reviewed current installation, but preserve the current task and active children; check the Intercom tool with action: "status" and arrange reload/restart only at a safe idle point. A disk selection, sent notice or peer claim does not prove this runtime upgraded, and this advice grants no new execution authority.`;
   };
 }
 

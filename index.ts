@@ -39,7 +39,7 @@ import { relaySenderName } from "./cross-machine-envelope.ts";
 import { runCommand, sendCrossMachine } from "./cross-machine-transport.ts";
 import { listMachineAgents, listSavedMachines, parseCrossMachineTarget } from "./cross-machine-discovery.ts";
 import { formatHandoverMessage, generateHandoverBody, readGitState } from "./handover.ts";
-import { LOADED_INTERCOM_VERSION, runtimeLabel, selectedLocalRuntimeVersion, createRuntimeAdvisories, createPeerUpgradeAdvisories } from "./runtime-version.ts";
+import { LOADED_INTERCOM_VERSION, runtimeLabel, selectedLocalRuntimeVersion, createRuntimeAdvisories, createPeerUpgradeAdvisories, createPeerVersionObservations } from "./runtime-version.ts";
 import { isIdleWakePending, releaseIdleWake, reserveIdleWake, supportsNativeCustomTurns } from "./idle-wake.ts";
 
 const INTERCOM_TOOL_NAME = "intercom";
@@ -684,7 +684,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   let client: IntercomClient | null = null;
   let runtimeAdvisory = createRuntimeAdvisories();
   let peerUpgradeAdvisory = createPeerUpgradeAdvisories();
-  const peerVersions = new Map<string, string | undefined>();
+  const peerVersions = createPeerVersionObservations();
+  const observeRoster = (sessions: SessionInfo[]) => sessions.map(session => ({ ...session, intercomVersion: peerVersions.observe(session) }));
   const config: IntercomConfig = loadConfig();
   const askTimeoutMs = getAskTimeoutMs();
   const localExtensions = new Map<string, {
@@ -1462,8 +1463,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       return;
     }
     const receivedMessage = { ...message, receiverReceivedAt };
-    peerVersions.set(from.id, receivedMessage.intercomVersion ?? from.intercomVersion);
-    if (peerVersions.size > 512) peerVersions.delete(peerVersions.keys().next().value!);
+    peerVersions.observe(from, receivedMessage.intercomVersion ?? from.intercomVersion);
     const advice = runtimeAdvisory(receivedMessage.intercomVersion ?? from.intercomVersion, "peer");
     if (advice) pi.sendMessage({ customType: "intercom-runtime-advisory", content: advice, display: true }, { triggerTurn: false });
     emitMessageReceipt(receivedMessage.id, "receiver_received");
@@ -1566,6 +1566,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           }
           break;
         case "session_left":
+          peerVersions.delete(message.sessionId);
           for (const namespace of localExtensions.keys()) {
             emitLocalExtensionEvent(namespace, { type: "session_left", sessionId: message.sessionId });
           }
@@ -1699,9 +1700,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     return nextReconnectPromise;
   }
   async function resolveSessionTarget(activeClient: IntercomClient, nameOrId: string): Promise<string | null> {
-    const sessions = await activeClient.listSessions();
-    peerVersions.clear();
-    for (const session of sessions) peerVersions.set(session.id, session.intercomVersion);
+    const sessions = observeRoster(await activeClient.listSessions());
     const byId = sessions.find(s => s.id === nameOrId);
     if (byId) {
       return byId.id;
@@ -1835,7 +1834,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     focus?: boolean;
     signal?: AbortSignal;
   }): Promise<DeliveryTarget> {
-    const sessions = await activeClient.listSessions();
+    const sessions = observeRoster(await activeClient.listSessions());
     const currentSessionId = activeClient.sessionId;
     if (!currentSessionId) {
       throw new Error("Current session is not registered with intercom.");
@@ -1870,6 +1869,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       ...(options.to ? { to: options.to } : {}),
       signal: options.signal,
     });
+    peerVersions.observe(session);
     return { id: session.id, label: session.name || session.id, projectPane };
   }
   /** Shared by send, handover, and /handover. Never throws; failures are returned as error results. */
@@ -2767,7 +2767,7 @@ Usage:
         case "list": {
           try {
             const mySessionId = connectedClient.sessionId;
-            const sessions = await connectedClient.listSessions();
+            const sessions = observeRoster(await connectedClient.listSessions());
             const currentSession = sessions.find(s => s.id === mySessionId);
             const otherSessions = sessions.filter(s => s.id !== mySessionId);
 
@@ -2799,7 +2799,7 @@ Usage:
         case "list-cwd": {
           try {
             const mySessionId = connectedClient.sessionId;
-            const sessions = await connectedClient.listSessions();
+            const sessions = observeRoster(await connectedClient.listSessions());
             const currentSession = sessions.find(s => s.id === mySessionId);
 
             if (!currentSession) {
@@ -3119,7 +3119,7 @@ Usage:
         case "status": {
           try {
             const mySessionId = connectedClient.sessionId;
-            const sessions = await connectedClient.listSessions();
+            const sessions = observeRoster(await connectedClient.listSessions());
             const pool = getIntercomScopeId();
             const receipt = messageId ? latestOutboundReceipts.get(messageId) : undefined;
             const observation = messageId ? `\nMessage: ${messageId}\nReceipt: ${receipt?.status ?? "unknown"}\nExecution/completion: unknown (transport receipts are not task outcomes)` : "";

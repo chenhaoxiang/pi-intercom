@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createPeerUpgradeAdvisories, createRuntimeAdvisories, isNewerRuntime, normalizeRuntimeVersion, runtimeLabel, selectedLocalRuntimeVersion } from "./runtime-version.ts";
+import { createPeerUpgradeAdvisories, createRuntimeAdvisories, createPeerVersionObservations, isNewerRuntime, normalizeRuntimeVersion, runtimeLabel, selectedLocalRuntimeVersion } from "./runtime-version.ts";
 import { isMessage, isSessionInfo, isSessionRegistration } from "./broker/protocol.ts";
 
 test("runtime versions reject display controls and unsupported identities without guessing", () => {
@@ -25,6 +25,8 @@ test("advice is local, deduplicated and explicitly preserves authority and activ
   const first = advice("0.18.0-fork.2", "peer");
   assert.match(first!, /peer-reported/);
   assert.match(first!, /safe idle/);
+  assert.match(first!, /Intercom tool with action: "status"/);
+  assert.doesNotMatch(first!, /\/intercom status/);
   assert.match(first!, /grants no new execution authority/);
   assert.equal(advice("0.18.0-fork.2", "peer"), undefined);
   assert.equal(advice("0.18.0-fork.2", "selection"), undefined);
@@ -38,6 +40,17 @@ test("sender guidance uses ordinary messages and never calls an unknown peer old
   assert.match(unknown, /ordinary authorized Intercom message/);
   assert.equal(advice("legacy", undefined), undefined);
   assert.equal(advice("same", "0.18.0-fork.2"), undefined);
+});
+
+test("legacy roster absence preserves message evidence only for the same endpoint", () => {
+  const cache = createPeerVersionObservations();
+  const peer = { id: "one", pid: 10, startedAt: 100, endpointEpoch: "first", cwd: "/fixture", model: "fixture", lastActivity: 100 };
+  assert.equal(cache.observe(peer, "0.18.0-fork.2"), "0.18.0-fork.2");
+  assert.equal(cache.observe(peer), "0.18.0-fork.2");
+  assert.equal(cache.observe({ ...peer, endpointEpoch: "replacement" }), undefined);
+  assert.equal(cache.get(peer.id), undefined);
+  cache.observe(peer, "0.18.0-fork.2"); cache.delete(peer.id);
+  assert.equal(cache.observe(peer), undefined);
 });
 
 test("selected local version is read without rewriting settings or conflating loaded version", () => {

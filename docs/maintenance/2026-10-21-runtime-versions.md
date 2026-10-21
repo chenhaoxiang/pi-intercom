@@ -25,6 +25,10 @@ A truly old client lacks this code: it does not magically acquire advice handlin
 
 Reuse Intercom list/status, message metadata, custom display notices and the existing Pi reload/restart lifecycle. Do not introduce a remote execution action, background updater, version polling service, approval ledger, forced child/broker restart or automatic update loop. A healthy old broker can remain live until a coordinated idle window; its 0.18 mailbox fix is not claimed active simply because this package is installed.
 
+## Independent-review corrections
+
+Retain message-derived peer version evidence only for the same PID/start-time/endpoint epoch; legacy roster absence no longer erases it. CWD and opened-project resolution record the selected peer version too, avoiding unnecessary unknown-version advice. Runtime replacement/session-left clears evidence, and the cache is bounded. The advice names the real Intercom tool `action: "status"`, not an unsupported slash subcommand. Final full suite: **396 passed, 1 skipped, 0 failed**; original reports remain retained and the corrective delta is reviewed separately.
+
 ## Validation boundary
 
 The existing full provider-free suite, new helper/protocol/integration checks and package verification remain gates. Additional synthetic mixed-broker smoke uses the actual retained 0.17.1-fork.5 and 0.18.0-fork.1 brokers plus the retained old receiver: message metadata survives, authored text/wake stays unchanged, and absent roster versions remain unknown. These fixtures own only their own temporary brokers and never stop the live shared broker.

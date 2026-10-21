@@ -6644,6 +6644,23 @@ test("runtime metadata reaches roster and messages without changing authored tex
   } finally { await harness.emitLifecycle("session_shutdown"); await fixture.cleanup(); }
 });
 
+test("cwd targeting uses current known peer runtime without an unknown upgrade hint", { concurrency: false }, async () => {
+  const { default: register } = await import("./index.ts");
+  const { LOADED_INTERCOM_VERSION } = await import("./runtime-version.ts");
+  const fixture = await setupClients(); const peer = new IntercomClient();
+  const harness = createExtensionHarness("cwd-version-sender");
+  try {
+    register(harness.pi as never); await harness.emitLifecycle("session_start");
+    await waitForSessionByName(fixture.planner, "cwd-version-sender");
+    await peer.connect({ name: "cwd-version-peer", cwd: "/synthetic-version-cwd", model: "fixture", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(), intercomVersion: LOADED_INTERCOM_VERSION });
+    const tool = harness.tools.find(item => item.name === "intercom")!;
+    const result = await tool.execute("cwd-version", { action: "send", cwd: "/synthetic-version-cwd", message: "Unchanged", wake: false }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(result.details?.delivered, true);
+    assert.equal(result.details?.runtimeUpgradeAdvice, undefined);
+    assert.ok(result.content.every(block => !block.text.includes("runtime is unknown")));
+  } finally { await peer.disconnect().catch(() => undefined); await harness.emitLifecycle("session_shutdown"); await fixture.cleanup(); }
+});
+
 test("newer peer advice adds no extra wake and is bounded per version", { concurrency: false }, async () => {
   await withIntercomConfig({ inboundTrigger: "replies" }, async () => {
     const { default: register } = await import("./index.ts");
