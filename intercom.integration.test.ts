@@ -6533,6 +6533,91 @@ test("modern CLI status sends carry explicit wake protocol metadata", { concurre
   }
 });
 
+test("prefix fallback ask cannot steal or reject a concurrent exact-target waiter", { concurrency: false, timeout: 15000 }, async (t) => {
+  const { default: register } = await import("./index.ts");
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const harness = createExtensionHarness("prefix-waiter-worker");
+  let release!: () => void;
+  const barrier = new Promise<void>((resolve) => { release = resolve; });
+  let entered!: () => void;
+  const paused = new Promise<void>((resolve) => { entered = resolve; });
+  const controllers = [new AbortController(), new AbortController()];
+  const pending: Array<Promise<CapturedToolResult>> = [];
+  try {
+    register(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const worker = await waitForSessionByName(orchestrator, "prefix-waiter-worker");
+    const originalList = IntercomClient.prototype.listSessions;
+    const originalSend = IntercomClient.prototype.send;
+    let pauseFallback = false;
+    t.mock.method(IntercomClient.prototype, "send", async function (this: InstanceType<typeof IntercomClient>, ...args: Parameters<InstanceType<typeof IntercomClient>["send"]>) {
+      const result = await originalSend.apply(this, args);
+      if (this.sessionId === worker.id && args[0] === "plan" && result.code === "E_TARGET_NOT_FOUND") pauseFallback = true;
+      return result;
+    });
+    t.mock.method(IntercomClient.prototype, "listSessions", async function (this: InstanceType<typeof IntercomClient>) {
+      const sessions = await originalList.call(this);
+      if (this.sessionId === worker.id && pauseFallback) { pauseFallback = false; entered(); await barrier; }
+      return sessions;
+    });
+    const orphans: Message[] = [];
+    planner.on("message", (_from, message) => { orphans.push(message); });
+    const tool = harness.tools.find((entry) => entry.name === "intercom")!;
+    const first = tool.execute("prefix-first", { action: "ask", to: "plan", message: "Prefix question" }, controllers[0].signal, undefined, harness.ctx);
+    pending.push(first);
+    await paused;
+    const exactReceived = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
+    const second = tool.execute("exact-second", { action: "ask", to: orchestrator.sessionId, message: "Exact question" }, controllers[1].signal, undefined, harness.ctx);
+    pending.push(second);
+    const [from, question] = await exactReceived;
+    release();
+    const refused = await first;
+    assert.equal(refused.details?.error, true);
+    assert.match(refused.content[0]?.text ?? "", /Already waiting/);
+    assert.equal(orphans.length, 0, "failed waiter registration must not send an orphan prefix ask");
+    await orchestrator.send(from.id, { text: "Exact answer", replyTo: question.id });
+    const answered = await second;
+    assert.notEqual(answered.details?.error, true, "a prefix retry must not reject the other request's waiter");
+    assert.match(answered.content[0]?.text ?? "", /Exact answer/);
+  } finally {
+    release(); controllers.forEach((controller) => controller.abort());
+    await Promise.allSettled(pending);
+    t.mock.restoreAll();
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("unique name prefix send infers the resolved peer's sole pending ask and wake intent", { concurrency: false, timeout: 15000 }, async () => {
+  await withIntercomConfig({ inboundTrigger: "replies" }, async () => {
+    const { default: register } = await import("./index.ts");
+    const { planner, orchestrator, cleanup } = await setupClients();
+    const harness = createExtensionHarness("prefix-infer-worker");
+    try {
+      register(harness.pi as never);
+      await harness.emitLifecycle("session_start");
+      const worker = await waitForSessionByName(orchestrator, "prefix-infer-worker");
+      const askId = "prefix-inference-ask";
+      await planner.send(worker.id, { messageId: askId, text: "Ready?", expectsReply: true });
+      await waitForCondition(() => harness.sentMessages.length === 1, "pending prefix ask injection");
+      const received = once(planner, "message") as Promise<[SessionInfo, Message]>;
+      const tool = harness.tools.find((entry) => entry.name === "intercom")!;
+      const result = await tool.execute("prefix-inferred-send", { action: "send", to: "plan", message: "Ready." }, new AbortController().signal, undefined, harness.ctx);
+      const message = (await received)[1];
+      assert.equal(message.replyTo, askId);
+      assert.equal(message.wake, true);
+      assert.equal(result.details?.replyTo, askId);
+      assert.equal(result.details?.attention, "wake_requested");
+      const sent = harness.entries.find((entry) => entry.type === "intercom_sent")?.data as { to: string; message: Message };
+      assert.equal(sent.to, "planner");
+      assert.equal(sent.message.replyTo, askId);
+      assert.equal(sent.message.wake, true);
+      const pending = await tool.execute("prefix-pending", { action: "pending" }, new AbortController().signal, undefined, harness.ctx);
+      assert.equal(pending.content[0]?.text, "No unresolved inbound asks.");
+    } finally { await harness.emitLifecycle("session_shutdown"); await cleanup(); }
+  });
+});
+
 function freezeRendererFixture<T>(value: T): T {
   if (value && typeof value === "object") {
     for (const child of Object.values(value)) freezeRendererFixture(child);

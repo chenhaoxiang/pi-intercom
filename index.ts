@@ -877,7 +877,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       };
     });
   }
-  function rejectReplyWaiter(error: Error): void {
+  function rejectReplyWaiter(error: Error, expectedReplyTo?: string): void {
+    if (expectedReplyTo !== undefined && replyWaiter?.replyTo !== expectedReplyTo) return;
     replyWaiter?.reject(error);
   }
   function clearReconnectTimer(): void {
@@ -1753,13 +1754,16 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       if (wait.signal?.aborted) {
         throw new Error("Cancelled");
       }
+      // A prefix lookup can yield after a refused attempt released its waiter.
+      // Do not send a new ask unless this attempt can own the single reply slot.
+      if (replyWaiter) throw new Error("Already waiting for a reply");
       const askId = randomUUID();
       wait.onAttempt(askId);
       reply = waitForReply(attemptTo, askId, wait.signal, () => activeClient.cancelAsk(askId), wait.deliveryState);
       reply.catch(() => undefined);
       const result = await activeClient.send(attemptTo, { ...payload, messageId: askId, expectsReply: true });
       if (!result.delivered) {
-        rejectReplyWaiter(new Error(undeliveredText(attemptTo, result)));
+        rejectReplyWaiter(new Error(undeliveredText(attemptTo, result)), askId);
         await reply.catch(() => undefined);
       }
       return result;
@@ -1971,8 +1975,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           details: { error: true, replyTo: activeReplyMismatch.message.id },
         };
       }
-      const inferredAsk = replyTo || request.handover ? null : replyTracker.findUniquePendingAskFrom(sendTo);
-      const effectiveReplyTo = replyTo ?? inferredAsk?.message.id;
+      let inferredAsk = replyTo || request.handover ? null : replyTracker.findUniquePendingAskFrom(sendTo);
+      let effectiveReplyTo = replyTo ?? inferredAsk?.message.id;
       if (confirmSend && !(cwd && openProjectPaneIfMissing)) {
         const confirmed = await ctx.ui.confirm(
           "Send message",
@@ -1988,14 +1992,20 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       if (request.handover && signal?.aborted) {
         return { content: [{ type: "text", text: "Handover was cancelled before delivery." }], details: { error: true } };
       }
-      const { result, display, resolution, noMatchText } = await sendWithNamePrefixFallback(connectedClient, { rawTo: cwd ? "" : to!, firstTarget: sendTo, display: targetDisplay }, (attemptTo) => connectedClient.send(attemptTo, {
-        text: message,
-        attachments,
-        replyTo: effectiveReplyTo,
-        supersedes,
-        retryOf,
-        ...(request.wake !== undefined || request.handover || effectiveReplyTo ? { wake: request.wake ?? true } : {}),
-      }));
+      const { result, display, resolution, noMatchText } = await sendWithNamePrefixFallback(connectedClient, { rawTo: cwd ? "" : to!, firstTarget: sendTo, display: targetDisplay }, (attemptTo) => {
+        // Infer only against this attempt's actual recipient, not an unresolved
+        // raw prefix. Use the accepted attempt's binding for history and wake too.
+        inferredAsk = replyTo || request.handover ? null : replyTracker.findUniquePendingAskFrom(attemptTo);
+        effectiveReplyTo = replyTo ?? inferredAsk?.message.id;
+        return connectedClient.send(attemptTo, {
+          text: message,
+          attachments,
+          replyTo: effectiveReplyTo,
+          supersedes,
+          retryOf,
+          ...(request.wake !== undefined || request.handover || effectiveReplyTo ? { wake: request.wake ?? true } : {}),
+        });
+      });
       if (!result.delivered) {
         return {
           content: [{ type: "text", text: noMatchText ?? `${undeliveredText(display, result)}${resolution}` }],
@@ -2018,7 +2028,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
             ? queuedText(display, inferredAsk ? "reply (inferred from pending ask)" : "message")
             : target.projectPane
               ? `Opened Herdr project pane ${target.projectPane.paneId} for ${target.projectPane.projectRoot} and sent message to ${targetDisplay}`
-              : inferredAsk ? `Reply sent to ${targetDisplay} (inferred from pending ask)` : `Message sent to ${display}${resolution}`,
+              : inferredAsk ? `Reply sent to ${display}${resolution} (inferred from pending ask)` : `Message sent to ${display}${resolution}`,
         }, {
           type: "text",
           text: request.wake !== false && (request.wake === true || request.handover || effectiveReplyTo)
@@ -2603,7 +2613,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
               : {},
           };
         } catch (error) {
-          rejectReplyWaiter(toError(error));
+          if (questionId) rejectReplyWaiter(toError(error), questionId);
           return {
             content: [{ type: "text", text: `Failed: ${getErrorMessage(error)}` }],
             details: { error: true, ...(questionId ? { messageId: questionId, deliveryState: latestDeliveryState(questionId, deliveryState) } : {}) },
@@ -2985,7 +2995,7 @@ Usage:
               },
             };
           } catch (error) {
-            rejectReplyWaiter(toError(error));
+            if (questionId) rejectReplyWaiter(toError(error), questionId);
             return {
               content: [{ type: "text", text: `Failed: ${getErrorMessage(error)}` }],
               details: { error: true, ...(questionId ? { messageId: questionId, deliveryState: latestDeliveryState(questionId, deliveryState) } : {}) },

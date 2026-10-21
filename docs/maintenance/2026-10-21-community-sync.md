@@ -24,6 +24,10 @@ Full provider-free `npm test`: 384 passed, 1 skipped, 0 failed using a short ext
 
 Independent review and exact-head CI are bound to the synchronization PR. Release assets must be built from the exact remote merge commit, include a source manifest and SHA-256 checksums, then be freshly downloaded and verified before installation. GitHub Release notes record those later outcomes; do not infer them from this source report.
 
+## Independent-review corrections
+
+The first review identified two prefix interactions: an ask retry could send without owning its waiter and reject another concurrent ask; a name-prefix send could bypass sole-pending-ask inference. Both are reproduced in deterministic provider-free red tests and fixed by per-attempt waiter admission/ID-scoped rejection plus inference against each actual recipient. Raw-first offline routing, explicit replyTo authority and wake policy remain unchanged. Both focused regressions pass; the final full suite records **386 passed, 1 skipped, 0 failed**. The first red-test harness attempt timed out before its barrier was made send-result-driven; the retained second red run reproduces both product failures and the final green run verifies them. The original review is retained, with narrow delta review required for the new exact head.
+
 ## Installation boundary
 
 The authorized rollout selects a new permanent versioned package directory only after artifact and provider-free host-loading checks. Preserve old packages and a settings backup; do not force-restart loaded parents, children or a shared broker. Disk selection does not prove existing sessions loaded the new code. Real credentials, paid queries/probes, provider settings and unrelated package declarations are not part of verification.
