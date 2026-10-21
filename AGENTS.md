@@ -10,6 +10,8 @@ This is the maintained fork of nicobailon/pi-intercom. Use an isolated worktree;
 
 ## Documentation map
 
+- [0.18.0-fork.1 community synchronization](docs/maintenance/2026-10-21-community-sync.md): exact main snapshot, retained fork behavior, validation and release/install boundaries.
+
 - `docs/maintenance/2026-10-20-actionable-relay-wake.md`: actionable result/control relay parity, receiver policy, red/green and native/mixed-broker regressions, rollout limits.
 
 - `docs/maintenance/2026-10-20-attention-display.md`: existing intent/receipt display, exact reply versus task completion, provider-free verification and runtime boundaries.

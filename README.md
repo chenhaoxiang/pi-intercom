@@ -10,7 +10,7 @@ Direct 1:1 messaging between Pi sessions on the same machine. This repository is
 
 ## Releases and branch policy
 
-This maintained source prepares **0.17.1-fork.7** (published rollback baseline **0.17.1-fork.6**), based on community **0.17.1**; verify the matching immutable Release before installation. Fork releases use `<community-version>-fork.<revision>`; the fork revision increases without pretending to be a new upstream release.
+This maintained source prepares **0.18.0-fork.1** (published rollback baseline **0.17.1-fork.7**), based on community **0.18.0**; verify the matching immutable Release before installation. Fork releases use `<community-version>-fork.<revision>`; the fork revision increases without pretending to be a new upstream release.
 
 - `main`: our maintained integration and release branch, including fork fixes.
 - `upstream-main`: an exact mirror of the community's `main`, with no fork commits. Never install from this branch.
@@ -19,7 +19,7 @@ This maintained source prepares **0.17.1-fork.7** (published rollback baseline *
 Install a reproducible release:
 
 ```bash
-pi install git:github.com/chenhaoxiang/pi-intercom@v0.17.1-fork.7
+pi install git:github.com/chenhaoxiang/pi-intercom@v0.18.0-fork.1
 ```
 
 [GitHub Releases](https://github.com/chenhaoxiang/pi-intercom/releases) include the installable package tarball, a provenance manifest, and `SHA256SUMS`. These GitHub releases are not npm publications under the upstream author's namespace. See [release maintenance](docs/releasing.md) for asset installation and future releases.
@@ -66,9 +66,15 @@ intercom({ action: "handover", to: "worker", message: "Continue from the current
 
 ## What the fork maintains
 
+In fullscreen mode, a plain left-click anywhere on an intercom message expands or collapses just that message; click again to undo. Only the display changes, not the message content, what the model sees, or session history. Dragging to select text, clicking links, wheel scrolling, and double- or triple-click word and line selection keep working and do not toggle the message, though the first click of a rapid double-click can. Regular mode leaves mouse input to the terminal.
+
+Ctrl+O still expands or collapses every message and clears per-message choices. Those choices are not saved: reloading, resuming, or forking a session, or anything that rebuilds the whole transcript, returns each message to the Ctrl+O state.
+
+
 The fork keeps the original intercom UX and adds reliability boundaries needed for long-running local Pi sessions:
 
-- community 0.17.1 fixes: Windows state persistence, bounded stalled-peer queues and ask-preferred bare replies, retaining 0.17.0 pool isolation, receiver-confirmed delivery and reconnect behavior;
+- community 0.18.0 adds virtual-model handovers, unique-name-prefix diagnostics, accurate queued/expired receipts and mailbox-aware broker lifetime;
+- retained community 0.17.1 fixes: Windows state persistence, bounded stalled-peer queues and ask-preferred bare replies, retaining 0.17.0 pool isolation, receiver-confirmed delivery and reconnect behavior;
 - durable `ask` / `reply` routing across broker restarts and Pi reloads; if a sender loses the original delivery receipt, a same-ID replay remains an unconfirmed outcome and a retry must use a new message ID;
 - explicit message IDs, sender sequences, timestamps, delivery states, and reply hints;
 - bounded duplicate delivery: a message is injected at most once per receiving session;
@@ -91,7 +97,7 @@ The normal transport is local IPC:
 - named pipe on Windows;
 - an explicit localhost TCP escape hatch only when configured for an environment that cannot use named pipes.
 
-The broker auto-spawns on first use, exits after its idle window, and is protected by a spawn lock. Clients use the existing reconnect path when the broker restarts. Cross-machine delivery, when enabled through an explicitly selected Herdr machine, relays through SSH; ordinary local sends never fall back to remote discovery.
+The broker auto-spawns on first use, exits after its idle window only when the mailbox is empty, and is protected by a spawn lock. Clients use the existing reconnect path when the broker restarts. Cross-machine delivery, when enabled through an explicitly selected Herdr machine, relays through SSH; ordinary local sends never fall back to remote discovery.
 
 ## Configuration
 

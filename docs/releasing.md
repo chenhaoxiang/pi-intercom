@@ -22,7 +22,7 @@ Applies only to chenhaoxiang/pi-intercom. The community project remains [nicobai
 
 ## Baseline for this release
 
-The latest verified published rollback baseline before this source candidate is **0.17.1-fork.6**; the current source candidate is **0.17.1-fork.7**. Per-version review, fresh-download checksums and installation evidence belong to the matching immutable Release; [mixed-version compatibility](maintenance/2026-10-18-legacy-wake-compatibility.md) retains the historical fork.3 acceptance. See [actionable relay wake](maintenance/2026-10-20-actionable-relay-wake.md) for fork.7 scope and native/mixed-broker verification. It retains community v0.17.1 `ddf288186d4c40b8a54fbe8c0d136cbe4893a032` into the maintained fork. Existing fork reliability repairs remain ancestors. The upstream Windows state, bounded stalled-peer queue and ask-preferred bare-reply changes are applied on top of durable routing, scoped pending-ask protection, dedupe, human-first delivery and restart-stable routing. See [the 0.17.1 synchronization report](maintenance/2026-10-17-community-0.17.1.md).
+The current source candidate is **0.18.0-fork.1**, integrating community version **0.18.0** through `684784cedcff4630e18d77c4e43ce0a691ad67fb`. Previous published **0.17.1-fork.7** remains available for rollback. See [the synchronization report](maintenance/2026-10-21-community-sync.md) for retained contracts and provider-free validation. Exact publication, fresh-download and installed-byte acceptance are recorded by the matching immutable Release; source metadata alone is not proof of runtime activation.
 
 ## Publish every version
 
