@@ -39,6 +39,7 @@ import { relaySenderName } from "./cross-machine-envelope.ts";
 import { runCommand, sendCrossMachine } from "./cross-machine-transport.ts";
 import { listMachineAgents, listSavedMachines, parseCrossMachineTarget } from "./cross-machine-discovery.ts";
 import { formatHandoverMessage, generateHandoverBody, readGitState } from "./handover.ts";
+import { LOADED_INTERCOM_VERSION, runtimeLabel, selectedLocalRuntimeVersion, createRuntimeAdvisories, createPeerUpgradeAdvisories } from "./runtime-version.ts";
 import { isIdleWakePending, releaseIdleWake, reserveIdleWake, supportsNativeCustomTurns } from "./idle-wake.ts";
 
 const INTERCOM_TOOL_NAME = "intercom";
@@ -633,7 +634,7 @@ function formatSessionListRow(session: SessionInfo, currentCwd: string, isSelf: 
   const pane = session.tmuxPane ? ` · tmux ${session.tmuxPane}` : "";
   const herdrLocation = formatHerdrLocation(session);
   const herdr = herdrLocation ? ` · ${herdrLocation}` : "";
-  return `• ${name} (${idPrefix}) — ${session.cwd} (${session.model}${formatContextUsage(session)}${pane})${herdr}${suffix}`;
+  return `• ${name} (${idPrefix}) — ${session.cwd} (${session.model}${formatContextUsage(session)} · ${runtimeLabel(session.intercomVersion)}${pane})${herdr}${suffix}`;
 }
 function previewText(value: unknown, maxLength = 72): string | undefined {
   if (typeof value !== "string") {
@@ -655,7 +656,7 @@ function formatMessageTimestamp(timestamp: number | undefined): string | undefin
   return typeof timestamp === "number" && Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : undefined;
 }
 function formatInboundDeliveryMetadata(message: Message): string {
-  const parts = [`id ${message.id}`, `intent ${messageAttention(message)}`, "execution/completion unknown"];
+  const parts = [`id ${message.id}`, `intent ${messageAttention(message)}`, runtimeLabel(message.intercomVersion), "execution/completion unknown"];
   if (typeof message.senderSequence === "number") parts.push(`seq ${message.senderSequence}`);
   if (message.supersedes) parts.push(`supersedes ${message.supersedes}`);
   if (message.retryOf) parts.push(`retry of ${message.retryOf}`);
@@ -681,6 +682,9 @@ function getNamePollMs(): number {
 }
 export default function piIntercomExtension(pi: ExtensionAPI) {
   let client: IntercomClient | null = null;
+  let runtimeAdvisory = createRuntimeAdvisories();
+  let peerUpgradeAdvisory = createPeerUpgradeAdvisories();
+  const peerVersions = new Map<string, string | undefined>();
   const config: IntercomConfig = loadConfig();
   const askTimeoutMs = getAskTimeoutMs();
   const localExtensions = new Map<string, {
@@ -1047,6 +1051,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       ...identity,
       cwd: liveContext.cwd,
       model: currentModel,
+      intercomVersion: LOADED_INTERCOM_VERSION,
       pid: process.pid,
       startedAt: sessionStartedAt,
       lastActivity: Date.now(),
@@ -1457,6 +1462,10 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       return;
     }
     const receivedMessage = { ...message, receiverReceivedAt };
+    peerVersions.set(from.id, receivedMessage.intercomVersion ?? from.intercomVersion);
+    if (peerVersions.size > 512) peerVersions.delete(peerVersions.keys().next().value!);
+    const advice = runtimeAdvisory(receivedMessage.intercomVersion ?? from.intercomVersion, "peer");
+    if (advice) pi.sendMessage({ customType: "intercom-runtime-advisory", content: advice, display: true }, { triggerTurn: false });
     emitMessageReceipt(receivedMessage.id, "receiver_received");
     if (replyWaiter) {
       const senderTarget = from.name || from.id;
@@ -1691,6 +1700,8 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
   }
   async function resolveSessionTarget(activeClient: IntercomClient, nameOrId: string): Promise<string | null> {
     const sessions = await activeClient.listSessions();
+    peerVersions.clear();
+    for (const session of sessions) peerVersions.set(session.id, session.intercomVersion);
     const byId = sessions.find(s => s.id === nameOrId);
     if (byId) {
       return byId.id;
@@ -1992,9 +2003,11 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       if (request.handover && signal?.aborted) {
         return { content: [{ type: "text", text: "Handover was cancelled before delivery." }], details: { error: true } };
       }
+      let deliveredTargetId = sendTo;
       const { result, display, resolution, noMatchText } = await sendWithNamePrefixFallback(connectedClient, { rawTo: cwd ? "" : to!, firstTarget: sendTo, display: targetDisplay }, (attemptTo) => {
         // Infer only against this attempt's actual recipient, not an unresolved
         // raw prefix. Use the accepted attempt's binding for history and wake too.
+        deliveredTargetId = attemptTo;
         inferredAsk = replyTo || request.handover ? null : replyTracker.findUniquePendingAskFrom(attemptTo);
         effectiveReplyTo = replyTo ?? inferredAsk?.message.id;
         return connectedClient.send(attemptTo, {
@@ -2021,6 +2034,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
       if (effectiveReplyTo) {
         dismissIncomingAsk(effectiveReplyTo);
       }
+      const upgradeAdvice = peerUpgradeAdvisory(deliveredTargetId, peerVersions.get(deliveredTargetId));
       return {
         content: [{
           type: "text",
@@ -2034,9 +2048,10 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
           text: request.wake !== false && (request.wake === true || request.handover || effectiveReplyTo)
             ? "Wake requested; transport delivery is not proof that the receiver started execution. Receiver policy remains authoritative."
             : "Context-only intent: no response requested. To delegate a task use wake: true or ask; delivery is not an opening acknowledgement.",
-        }],
+        }, ...(upgradeAdvice ? [{ type: "text" as const, text: upgradeAdvice }] : [])],
         details: {
           ...deliveryDetails(result),
+          ...(upgradeAdvice ? { runtimeUpgradeAdvice: upgradeAdvice } : {}),
           attention: request.wake !== false && (request.wake === true || request.handover || effectiveReplyTo) ? "wake_requested" : "context_only",
           ...(effectiveReplyTo ? { replyTo: effectiveReplyTo } : {}),
           ...(target.projectPane ? { openedProjectPane: true, paneId: target.projectPane.paneId, projectRoot: target.projectPane.projectRoot } : {}),
@@ -2110,6 +2125,9 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     disposed = false;
     runtimeStarted = true;
     runtimeGeneration += 1;
+    runtimeAdvisory = createRuntimeAdvisories();
+    peerUpgradeAdvisory = createPeerUpgradeAdvisories();
+    peerVersions.clear();
     outboxRequestIds.clear();
     reconnectAttempt = 0;
     sessionHeldBlocked = false;
@@ -2740,6 +2758,9 @@ Usage:
 
       syncPresenceIdentity(ctx.sessionManager.getSessionId());
 
+      const localAdvice = runtimeAdvisory(selectedLocalRuntimeVersion(), "selection");
+      if (localAdvice) pi.sendMessage({ customType: "intercom-runtime-advisory", content: localAdvice, display: true }, { triggerTurn: false });
+
       const { action, to, message, wake, attachments, replyTo, messageId, supersedes, retryOf, cwd, openProjectPaneIfMissing, focus } = params;
 
       switch (action) {
@@ -3107,7 +3128,7 @@ Usage:
             return {
               content: [{
                 type: "text",
-                text: `**Intercom status:**\nConnected: Yes\nSession ID: ${mySessionId}\nSession name: ${mySession?.name ?? "(unnamed)"} (short id: ${shortId})${pool ? `\nPool: ${pool}` : ""}\nActive sessions: ${sessions.length}${observation}`,
+                text: `**Intercom status:**\nConnected: Yes\nLoaded runtime: ${runtimeLabel(LOADED_INTERCOM_VERSION)}\nBroker runtime: ${runtimeLabel(connectedClient.brokerVersion)} (separate process; reload does not restart it)\nSession ID: ${mySessionId}\nSession name: ${mySession?.name ?? "(unnamed)"} (short id: ${shortId})${pool ? `\nPool: ${pool}` : ""}\nActive sessions: ${sessions.length}${observation}`,
               }],
               details: messageId ? { messageId, receipt: receipt?.status ?? "unknown", execution: "unknown", completion: "unknown" } : {},
             };

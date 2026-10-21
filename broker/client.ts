@@ -5,6 +5,7 @@ import { writeMessage, createMessageReader } from "./framing.ts";
 import { getBrokerConnectTarget, type BrokerConnectTarget } from "./paths.ts";
 import { isMessage, isMessageControl, isMessageReceipt, isPendingAsk, isSessionInfo } from "./protocol.ts";
 import { getIntercomScopeId } from "../config.ts";
+import { normalizeRuntimeVersion } from "../runtime-version.ts";
 import { EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, PENDING_ASKS_FEATURE, SESSION_HELD_ERROR_CODE, type DeliveryDetails } from "../types.ts";
 import type {
   Attachment,
@@ -79,6 +80,9 @@ export class IntercomClient extends EventEmitter {
   private socket: net.Socket | null = null;
   private _sessionId: string | null = null;
   private _features = new Set<string>();
+  private intercomVersion: string | undefined;
+  private _brokerVersion: string | undefined;
+  get brokerVersion(): string | undefined { return this._brokerVersion; }
   private pendingSends = new Map<string, { resolve: (r: SendResult) => void; reject: (e: Error) => void }>();
   private pendingLists = new Map<string, { resolve: (sessions: SessionInfo[]) => void; reject: (e: Error) => void }>();
   private pendingAskLists = new Map<string, { resolve: (asks: PendingAsk[]) => void; reject: (e: Error) => void }>();
@@ -193,6 +197,7 @@ export class IntercomClient extends EventEmitter {
         return;
       }
       this.socket = socket;
+      this.intercomVersion = session.intercomVersion;
       this.disconnectError = null;
       let settled = false;
       const timeout = setTimeout(() => {
@@ -242,6 +247,7 @@ export class IntercomClient extends EventEmitter {
         }
         this._sessionId = null;
         this._features.clear();
+        this._brokerVersion = undefined;
         this.disconnectError = null;
         if (connectionEstablished && !wasDisconnecting) {
           this.emit("disconnected", disconnectError);
@@ -353,10 +359,12 @@ export class IntercomClient extends EventEmitter {
         }
 
         this._sessionId = brokerMessage.sessionId;
+        this._brokerVersion = normalizeRuntimeVersion(brokerMessage.brokerVersion);
         this._features = new Set((brokerMessage.features as string[] | undefined) ?? []);
         const registered: BrokerMessage = {
           type: "registered",
           sessionId: brokerMessage.sessionId,
+          ...(this._brokerVersion ? { brokerVersion: this._brokerVersion } : {}),
           ...(this._features.size > 0 ? { features: [...this._features] } : {}),
         };
         this.emit("broker_message", registered);
@@ -705,6 +713,7 @@ export class IntercomClient extends EventEmitter {
       // Per-message metadata survives even a legacy broker's spread-forwarding.
       // Missing means a pre-protocol sender, not a modern context-only send.
       wakeProtocol: 1,
+      ...(this.intercomVersion ? { intercomVersion: this.intercomVersion } : {}),
       ...(options.wake !== undefined ? { wake: options.wake } : {}),
       provenance: options.provenance,
       crossMachine: options.crossMachine,

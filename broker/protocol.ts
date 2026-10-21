@@ -10,6 +10,8 @@ import type {
   SessionRegistration,
 } from "../types.ts";
 
+import { normalizeRuntimeVersion } from "../runtime-version.ts";
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -139,6 +141,8 @@ export function isMessage(value: unknown): value is Message {
     return false;
   }
 
+  if (value.intercomVersion !== undefined && !normalizeRuntimeVersion(value.intercomVersion)) return false;
+
   for (const key of ["senderSequence", "brokerReceivedAt", "brokerDeliveredAt", "receiverReceivedAt", "injectedAt"] as const) {
     if (value[key] !== undefined && typeof value[key] !== "number") {
       return false;
@@ -217,6 +221,8 @@ export function isSessionInfo(value: unknown): value is SessionInfo {
     return false;
   }
 
+  if (value.intercomVersion !== undefined && !normalizeRuntimeVersion(value.intercomVersion)) return false;
+
   if (value.endpointEpoch !== undefined && typeof value.endpointEpoch !== "string") {
     return false;
   }
@@ -261,6 +267,7 @@ export function isSessionId(value: unknown): value is string {
 }
 
 export function isSessionRegistration(value: unknown): value is SessionRegistration {
+  if (isRecord(value) && value.intercomVersion !== undefined && !normalizeRuntimeVersion(value.intercomVersion)) return false;
   if (!isRecord(value)) {
     return false;
   }

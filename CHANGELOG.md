@@ -4,6 +4,10 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.18.0-fork.2] - 2026-10-21
+
+- Report loaded extension/broker versions, preserve optional version metadata across legacy brokers and provide bounded safe-idle upgrade advice without changing authored messages, wake policy or process state.
+
 ## [0.18.0-fork.1] - 2026-10-21
 
 - Integrate community 0.18.0 at 684784ce, retaining exact reply routing, explicit/legacy wake semantics, native custom turns and actionable result relays. Preserve queued receipts and per-message expansion together.

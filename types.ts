@@ -50,6 +50,8 @@ export interface SessionInfo {
   id: string;
   /** Broker-owned lifetime of this live endpoint. */
   endpointEpoch?: string;
+  /** Self-reported loaded runtime, not disk selection or a capability guarantee. */
+  intercomVersion?: string;
   name?: string;
   /** True only when the extension synthesized name for an unnamed runtime. */
   runtimeFallbackAlias?: boolean;
@@ -112,6 +114,8 @@ export interface Message {
   expectsReply?: boolean;
   /** Sender understands explicit wake semantics; absent retains legacy implicit wake. */
   wakeProtocol?: 1;
+  /** Additive sender runtime metadata survives legacy broker spread-forwarding. */
+  intercomVersion?: string;
   /** Explicitly request a receiver turn for a task handoff, or suppress one for a status notice. */
   wake?: boolean;
   provenance?: MessageProvenance;
@@ -198,7 +202,7 @@ export type ClientMessage =
     };
 
 export type BrokerMessage =
-  | { type: "registered"; sessionId: string; features?: string[] }
+  | { type: "registered"; sessionId: string; features?: string[]; brokerVersion?: string }
   | { type: "sessions"; requestId: string; sessions: SessionInfo[] }
   | { type: "pending_asks"; requestId: string; version: 1; asks: PendingAsk[] }
   | { type: "message"; from: SessionInfo; message: Message }

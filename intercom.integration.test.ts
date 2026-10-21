@@ -422,6 +422,7 @@ test("opt-in TCP broker requires endpoint state for health and registration", { 
     assert.deepEqual(registerMessages, [{
       type: "registered",
       sessionId: "authorized-tcp-client",
+      brokerVersion: (await import("./runtime-version.ts")).LOADED_INTERCOM_VERSION,
       features: ["extension-bus-v1", "exact-send-v1", "pending-asks-v1"],
     }]);
   } finally {
@@ -6615,6 +6616,54 @@ test("unique name prefix send infers the resolved peer's sole pending ask and wa
       const pending = await tool.execute("prefix-pending", { action: "pending" }, new AbortController().signal, undefined, harness.ctx);
       assert.equal(pending.content[0]?.text, "No unresolved inbound asks.");
     } finally { await harness.emitLifecycle("session_shutdown"); await cleanup(); }
+  });
+});
+
+test("runtime metadata reaches roster and messages without changing authored text or wake", { concurrency: false }, async () => {
+  const { default: register } = await import("./index.ts");
+  const { LOADED_INTERCOM_VERSION } = await import("./runtime-version.ts");
+  const fixture = await setupClients();
+  const harness = createExtensionHarness("runtime-metadata-worker");
+  try {
+    register(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const self = await waitForSessionByName(fixture.planner, "runtime-metadata-worker");
+    assert.equal(self.intercomVersion, LOADED_INTERCOM_VERSION);
+    const received = once(fixture.planner, "message") as Promise<[SessionInfo, Message]>;
+    const tool = harness.tools.find((item) => item.name === "intercom")!;
+    await tool.execute("runtime-send", { action: "send", to: fixture.planner.sessionId, message: "Exact authored text", wake: false }, new AbortController().signal, undefined, harness.ctx);
+    const message = (await received)[1];
+    assert.equal(message.content.text, "Exact authored text");
+    assert.equal(message.intercomVersion, LOADED_INTERCOM_VERSION);
+    assert.equal(message.wake, false);
+    const status = await tool.execute("runtime-status", { action: "status" }, new AbortController().signal, undefined, harness.ctx);
+    assert.match(status.content[0].text, new RegExp(`Loaded runtime: Intercom ${LOADED_INTERCOM_VERSION}`));
+    assert.match(status.content[0].text, new RegExp(`Broker runtime: Intercom ${LOADED_INTERCOM_VERSION}`));
+    const roster = await tool.execute("runtime-list", { action: "list" }, new AbortController().signal, undefined, harness.ctx);
+    assert.match(roster.content[0].text, /Intercom unknown/);
+  } finally { await harness.emitLifecycle("session_shutdown"); await fixture.cleanup(); }
+});
+
+test("newer peer advice adds no extra wake and is bounded per version", { concurrency: false }, async () => {
+  await withIntercomConfig({ inboundTrigger: "replies" }, async () => {
+    const { default: register } = await import("./index.ts");
+    const fixture = await setupClients();
+    const sender = new IntercomClient();
+    const harness = createExtensionHarness("runtime-advice-worker", { hasUI: true });
+    try {
+      register(harness.pi as never);
+      await harness.emitLifecycle("session_start");
+      const self = await waitForSessionByName(fixture.planner, "runtime-advice-worker");
+      await sender.connect({ name: "newer-runtime", cwd: repoDir, model: "fixture", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(), intercomVersion: "99.0.0-fork.1" });
+      for (let i = 0; i < 2; i++) await sender.send(self.id, { text: `Status ${i}`, wake: false });
+      await waitForCondition(() => harness.sentMessages.filter(item => item.message.customType === "intercom_message").length === 2, "versioned status injection");
+      const advice = harness.sentMessages.filter(item => item.message.customType === "intercom-runtime-advisory");
+      assert.equal(advice.length, 1);
+      assert.equal(advice[0].options?.triggerTurn, false);
+      assert.match(String(advice[0].message.content), /safe idle/);
+      assert.deepEqual(harness.userMessages, []);
+      assert.ok(harness.sentMessages.every(item => item.options?.triggerTurn === false));
+    } finally { await sender.disconnect().catch(() => undefined); await harness.emitLifecycle("session_shutdown"); await fixture.cleanup(); }
   });
 });
 
