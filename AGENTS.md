@@ -10,6 +10,8 @@ This is the maintained fork of nicobailon/pi-intercom. Use an isolated worktree;
 
 ## Documentation map
 
+- `docs/maintenance/2026-10-21-sdk-baseline.md`: exact Pi 1.3 maintenance SDK/lock, host-owned runtime peers, provider-free regressions and source-only delivery boundaries.
+
 - [Runtime versions and safe convergence](docs/maintenance/2026-10-21-runtime-versions.md): loaded-version metadata, legacy broker compatibility, bounded non-triggering advice and safe-idle activation limits.
 - `openspec/specs/runtime-version-awareness/spec.md`: current loaded-version/advice contract; implementation record is `openspec/changes/archive/2026-10-21-runtime-version-advisories/`. Service Tier state safety remains owned by its own repository.
 
