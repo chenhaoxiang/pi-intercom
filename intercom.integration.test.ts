@@ -280,6 +280,12 @@ function createExtensionHarness(sessionName: string | (() => string) = "child-wo
   };
 }
 
+// A wake must be a native custom turn on the pinned Pi 1.3 SDK, never a fabricated user message.
+function nativeWakeCount(harness: ReturnType<typeof createExtensionHarness>): number {
+  assert.deepEqual(harness.userMessages, [], "native wake must not manufacture a user prompt");
+  return harness.sentMessages.filter(({ options }) => options?.triggerTurn === true).length;
+}
+
 async function connectRawRegistered(sessionId: string, name: string, sessionOverrides: Record<string, unknown> = {}) {
   const net = await import("node:net");
   const { getBrokerSocketPath } = await import("./broker/paths.ts");
@@ -2778,7 +2784,7 @@ test("busy interactive sessions steer top-level asks without aborting", { concur
   }
 });
 
-test("idle ordinary messages stay context-only while explicit asks wake through a user prompt", { concurrency: false }, async () => {
+test("idle ordinary messages stay context-only while explicit asks wake through a native custom turn", { concurrency: false }, async () => {
   await withIntercomConfig({ inboundTrigger: "replies" }, async () => {
 	const { default: piIntercomExtension } = await import("./index.ts");
 	const { planner, cleanup } = await setupClients();
@@ -2801,14 +2807,14 @@ test("idle ordinary messages stay context-only while explicit asks wake through 
 
 		assert.equal((await planner.send(worker.id, { messageId: "idle-trigger", text: "Handle this now", expectsReply: true })).delivered, true);
 		await waitForCondition(() => harness.sentMessages.length === 2, "explicit ask injection");
-		assert.deepEqual(harness.sentMessages[1]?.options, undefined, "ask uses the normal before_agent_start lifecycle");
-		assert.deepEqual(harness.userMessages, ["New intercom message above."]);
+		assert.deepEqual(harness.sentMessages[1]?.options, { triggerTurn: true }, "ask uses the native custom-turn lifecycle");
+		assert.equal(nativeWakeCount(harness), 1);
 
 		await harness.emitLifecycle("agent_start");
 		await harness.emitLifecycle("agent_end");
 		assert.equal((await planner.send(worker.id, { messageId: "idle-trigger-2", text: "And this", expectsReply: true })).delivered, true);
 		await waitForCondition(() => harness.sentMessages.length === 3, "second explicit ask injection");
-		assert.equal(harness.userMessages.length, 2, "a started run re-arms the wake");
+		assert.equal(nativeWakeCount(harness), 2, "a started run re-arms the wake");
 	} finally {
 		await harness.emitLifecycle("session_shutdown");
 		await cleanup();
@@ -2827,7 +2833,7 @@ test("explicit non-blocking wake requests survive transport without creating a p
     const worker = await waitForSessionByName(planner, "explicit-wake-worker");
     assert.equal((await planner.send(worker.id, { text: "Continue the authorized task", wake: true })).delivered, true);
     await waitForCondition(() => harness.sentMessages.length === 1, "explicit wake injection");
-    assert.deepEqual(harness.userMessages, ["New intercom message above."]);
+    assert.equal(nativeWakeCount(harness), 1);
     const details = harness.sentMessages[0]?.message.details as { message: Message };
     assert.equal(details.message.wake, true);
     assert.equal(details.message.expectsReply, undefined);
@@ -2850,7 +2856,7 @@ test("relay v2 wake semantics reach the default receiver and never policy remain
         const receiver = await waitForSessionByName(planner, "relay-policy-fixture");
         const code = await runCli(["relay", "--envelope-stdin", "--json"], { client: new IntercomClient(), out: { write() {} }, err: { write() {} }, readStdin: async () => JSON.stringify({ version: 2, target: receiver.id, text: "remote-task-or-status", wake, trust: "ssh-asserted", origin: { name: "remote-fixture", sessionId: "remote-id", machine: "fixture" } }) });
         assert.equal(code, 0); await waitForCondition(() => harness.sentMessages.length === 1, "relay injection");
-        assert.equal(harness.userMessages.length, expectedTurns, `${policy}/${wake}`);
+        assert.equal(nativeWakeCount(harness), expectedTurns, `${policy}/${wake}`);
         const details = harness.sentMessages[0].message.details as { message: Message };
         assert.equal(details.message.wake, wake); assert.equal(details.message.expectsReply, undefined);
       } finally { await harness.emitLifecycle("session_shutdown"); await cleanup(); }
@@ -2873,7 +2879,7 @@ test("ordinary inbound hints address the exact sender even when its name is dupl
     await waitForCondition(() => harness.sentMessages.length === 1, "exact sender hint");
     assert.ok((harness.sentMessages[0]?.message.content ?? "").includes(
       `intercom({ action: "send", to: ${JSON.stringify(planner.sessionId)}, message: "..." })`));
-    assert.equal(harness.userMessages.length, 0);
+    assert.equal(nativeWakeCount(harness), 0);
     const tool = harness.tools.find((item) => item.name === "intercom")!;
     const ambiguous = await tool.execute("ambiguous-name", { action: "send", to: "planner", message: "reply" }, new AbortController().signal, undefined, harness.ctx);
     assert.equal(ambiguous.details?.error, true, "unbound duplicate names must not silently pick a receiver");
@@ -2934,8 +2940,8 @@ test("idle inbound asks include an exact replyTo hint", { concurrency: false }, 
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     assert.equal(harness.sentMessages.length, 1);
-    assert.equal(harness.sentMessages[0]?.options, undefined, "idle ask must not bypass before_agent_start via triggerTurn");
-    assert.deepEqual(harness.userMessages, ["New intercom message above."], "idle ask wakes through the normal prompt lifecycle");
+    assert.deepEqual(harness.sentMessages[0]?.options, { triggerTurn: true }, "idle ask retains the native custom source");
+    assert.equal(nativeWakeCount(harness), 1, "idle ask wakes through the normal prompt lifecycle");
     assert.match(harness.sentMessages[0]?.message.content ?? "", /intercom\(\{ action: "reply", replyTo: "idle-exact-ask", message: "\.\.\." \}\)/);
   } finally {
     await harness.emitLifecycle("session_shutdown");
@@ -2966,7 +2972,7 @@ test("an idle wake sent by another extension covers intercom messages, and inter
     assert.equal(reservations.get(sessionManager)?.sentAt, undefined, "a started run releases the shared wake");
     assert.equal((await planner.send(worker.id, { messageId: "shared-wake-2", text: "Second" })).delivered, true);
     await waitForCondition(() => harness.sentMessages.length === 2, "second injected message");
-    assert.deepEqual(harness.userMessages, ["New intercom message above."]);
+    assert.equal(nativeWakeCount(harness), 1);
     assert.notEqual(reservations.get(sessionManager)?.sentAt, undefined, "other extensions see intercom's wake");
   } finally {
     await harness.emitLifecycle("session_shutdown");
@@ -3100,8 +3106,8 @@ for (const outcome of ["success", "failure", "abort", "cancel"]) {
       assert.equal(harness.sentMessages.length, 2);
       assert.match(harness.sentMessages[0]?.message.content ?? "", /First held/);
       assert.match(harness.sentMessages[1]?.message.content ?? "", /Second held/);
-      assert.deepEqual(harness.sentMessages.map(({ options }) => options), [undefined, undefined]);
-      assert.deepEqual(harness.userMessages, ["New intercom message above."], "one wake covers both messages");
+      assert.deepEqual(harness.sentMessages.map(({ options }) => options), [{ triggerTurn: true }, undefined]);
+      assert.equal(nativeWakeCount(harness), 1, "one wake covers both messages");
       await waitForCondition(() => receipts.get(`${outcome}-1`)?.includes("injected") === true, "first injected receipt");
       await waitForCondition(() => receipts.get(`${outcome}-2`)?.includes("injected") === true, "second injected receipt");
       assert.deepEqual(receipts.get(`${outcome}-1`), ["receiver_received", "acknowledged", "queued", "injected"]);
@@ -3261,7 +3267,7 @@ test("human-first releases the next held peer only after the woken run starts", 
       await waitForCondition(() => harness.sentMessages.length === 1, "peer A injected");
       await new Promise((resolve) => setTimeout(resolve, 350));
       assert.equal(harness.sentMessages.length, 1, "peer B must wait for a later turn");
-      assert.deepEqual(harness.userMessages, ["New intercom message above."]);
+      assert.equal(nativeWakeCount(harness), 1);
 
       await harness.emitLifecycle("agent_start");
       await waitForCondition(() => harness.sentMessages.length === 2, "peer B injected");
@@ -5750,8 +5756,8 @@ for (const event of ["subagent:result-intercom", "subagent:control-intercom"]) {
           assert.equal(message.wake, true, "an actionable relay must not become a modern context-only send");
           assert.equal(message.expectsReply, undefined, "attention must not invent a pending ask");
           assert.equal(message.replyTo, undefined);
-          assert.deepEqual(target.userMessages, policy === "replies" && !busy ? ["New intercom message above."] : []);
-          assert.deepEqual(entry.options, policy === "never" ? { triggerTurn: false } : busy ? { deliverAs: "steer" } : undefined);
+          assert.equal(nativeWakeCount(target), policy === "replies" && !busy ? 1 : 0);
+          assert.deepEqual(entry.options, policy === "never" ? { triggerTurn: false } : busy ? { deliverAs: "steer" } : { triggerTurn: true });
           assert.deepEqual(await fixture.planner.listPendingAsks(), []);
           if (event === "subagent:result-intercom") {
             await waitForCondition(() => deliveryAcks.length === 1, "relay transport acknowledgement");
@@ -5802,15 +5808,15 @@ test("subagent relay events wake an idle orchestrator and steer a busy one", { c
 
     harness.pi.events.emit("subagent:result-intercom", { to: "relay-orchestrator", requestId: "idle-result", message: "subagent result\n\nStatus: completed" });
     await waitForCondition(() => harness.sentMessages.length === 1, "idle relay message");
-    assert.equal(harness.sentMessages[0]?.options, undefined);
-    assert.deepEqual(harness.userMessages, ["New intercom message above."]);
+    assert.deepEqual(harness.sentMessages[0]?.options, { triggerTurn: true });
+    assert.equal(nativeWakeCount(harness), 1);
 
     await harness.emitLifecycle("agent_start");
     idle = false;
     harness.pi.events.emit("subagent:control-intercom", { to: "relay-orchestrator", message: "subagent needs attention" });
     await waitForCondition(() => harness.sentMessages.length === 2, "busy relay message");
     assert.equal(harness.sentMessages[1]?.options, undefined, "Pi steers untriggered messages while streaming");
-    assert.equal(harness.userMessages.length, 1, "a busy session must not get a wake prompt");
+    assert.equal(nativeWakeCount(harness), 1, "a busy session must not get a wake prompt");
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
@@ -5829,17 +5835,17 @@ test("a wake prompt that never starts a run stops blocking later wakes after its
     piIntercomExtension(harness.pi as never);
     await harness.emitLifecycle("session_start");
 
-    // An input handler can handle the wake prompt, so no agent_start follows it.
+    // A failed custom-turn preflight can finish without agent_start.
     relay("first");
     await waitForCondition(() => harness.sentMessages.length === 1, "first relay message");
     relay("second");
     await waitForCondition(() => harness.sentMessages.length === 2, "second relay message");
-    assert.equal(harness.userMessages.length, 1, "a recent wake may still be starting");
+    assert.equal(nativeWakeCount(harness), 1, "a recent wake may still be starting");
 
     offset += 10_001;
     relay("third");
     await waitForCondition(() => harness.sentMessages.length === 3, "third relay message");
-    assert.equal(harness.userMessages.length, 2, "an expired wake must not block the next one");
+    assert.equal(nativeWakeCount(harness), 2, "an expired wake must not block the next one");
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
@@ -6442,14 +6448,14 @@ test("legacy unmarked sends wake a reply-driven receiver once without inventing 
       send();
       await waitForCondition(() => harness.sentMessages.length === 1, "legacy task injection");
       assert.equal((harness.sentMessages[0].message.details as { message: Message }).message.wake, undefined);
-      assert.deepEqual(harness.userMessages, ["New intercom message above."], "omitted wake retains the pre-upgrade sender contract");
+      assert.equal(nativeWakeCount(harness), 1, "omitted wake retains the pre-upgrade sender contract");
       assert.deepEqual(await fixture.planner.listPendingAsks(), [], "legacy compatibility must not manufacture a blocking ask");
       await harness.emitLifecycle("agent_start");
       await harness.emitLifecycle("agent_end");
       send();
       await new Promise((resolve) => setTimeout(resolve, 30));
       assert.equal(harness.sentMessages.length, 1, "legacy replay is still deduplicated");
-      assert.equal(harness.userMessages.length, 1);
+      assert.equal(nativeWakeCount(harness), 1);
     } finally {
       legacy.socket.destroy();
       await harness.emitLifecycle("session_shutdown");
