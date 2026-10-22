@@ -10,7 +10,7 @@ Direct 1:1 messaging between Pi sessions on the same machine. This repository is
 
 ## Releases and branch policy
 
-This maintained source prepares **0.18.0-fork.3** (published rollback baseline **0.18.0-fork.2**), based on community **0.18.0**; verify the matching immutable Release before installation. Fork releases use `<community-version>-fork.<revision>`; the fork revision increases without pretending to be a new upstream release.
+The current published and installed maintained release is **0.18.0-fork.3** (published rollback baseline **0.18.0-fork.2**), based on community **0.18.0**; verify the matching immutable Release before installation. Fork releases use `<community-version>-fork.<revision>`; the fork revision increases without pretending to be a new upstream release.
 
 - `main`: our maintained integration and release branch, including fork fixes.
 - `upstream-main`: an exact mirror of the community's `main`, with no fork commits. Never install from this branch.
