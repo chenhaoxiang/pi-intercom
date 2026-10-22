@@ -1,4 +1,4 @@
-import { BorderedLoader, defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { BorderedLoader, defineTool, VERSION, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { randomUUID } from "crypto";
 import { Type } from "typebox";
@@ -680,7 +680,7 @@ function getNamePollMs(): number {
   }
   return 1000;
 }
-export default function piIntercomExtension(pi: ExtensionAPI) {
+export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSION) {
   let client: IntercomClient | null = null;
   let runtimeAdvisory = createRuntimeAdvisories();
   let peerUpgradeAdvisory = createPeerUpgradeAdvisories();
@@ -1373,7 +1373,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
     const deliveryMetadata = formatInboundDeliveryMetadata(injectedMessage);
     const actionable = shouldTriggerInboundMessage(entry);
     const trigger = delivery === "trigger" && actionable;
-    const native = supportsNativeCustomTurns();
+    const native = supportsNativeCustomTurns(piVersion);
     const wakeContext = trigger ? getLiveContext(runtimeContext, generation) : undefined;
     const nativeWake = native && wakeContext?.isIdle() && !isIdleWakePending(wakeContext.sessionManager);
     if (nativeWake) reserveIdleWake(wakeContext.sessionManager);
@@ -1388,7 +1388,7 @@ export default function piIntercomExtension(pi: ExtensionAPI) {
         : actionable ? { deliverAs: "steer" } : { triggerTurn: false },
     );
     // Older Pi hosts skip before_agent_start for custom trigger turns, so wake
-    // through the normal user lifecycle. Pi 1.3+ keeps the typed custom source.
+    // through the normal user lifecycle. Released Pi 1.2+ keeps the typed custom source.
     if (!native && wakeContext?.isIdle() && !isIdleWakePending(wakeContext.sessionManager)) {
       reserveIdleWake(wakeContext.sessionManager);
       pi.sendUserMessage("New intercom message above.", { deliverAs: "steer" });

@@ -2949,6 +2949,50 @@ test("idle inbound asks include an exact replyTo hint", { concurrency: false }, 
   }
 });
 
+test("Pi 1.1 retains the legacy wake prompt while ordinary notices stay silent", { concurrency: false }, async () => {
+  await withIntercomConfig({ inboundTrigger: "replies" }, async () => {
+    const { default: register } = await import("./index.ts");
+    const { planner, cleanup } = await setupClients();
+    const harness = createExtensionHarness("legacy-native-boundary", { hasUI: true, isIdle: () => true });
+    try {
+      register(harness.pi as never, "1.1.0");
+      await harness.emitLifecycle("session_start");
+      const worker = await waitForSessionByName(planner, "legacy-native-boundary");
+      await planner.send(worker.id, { messageId: "legacy-notice", text: "Context only", wake: false });
+      await waitForCondition(() => harness.sentMessages.length === 1, "legacy notice");
+      assert.deepEqual(harness.sentMessages[0]?.options, { triggerTurn: false });
+      assert.deepEqual(harness.userMessages, []);
+      await planner.send(worker.id, { messageId: "legacy-action", text: "Action", wake: true });
+      await waitForCondition(() => harness.sentMessages.length === 2, "legacy action");
+      assert.equal(harness.sentMessages[1]?.options, undefined);
+      assert.deepEqual(harness.userMessages, ["New intercom message above."]);
+    } finally {
+      await harness.emitLifecycle("session_shutdown");
+      await cleanup();
+    }
+  });
+});
+
+test("on Pi 1.2.0 and newer, idle sessions wake through triggerTurn without a wake line", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const { planner, cleanup } = await setupClients();
+  const harness = createExtensionHarness("trigger-turn-worker", { hasUI: true, isIdle: () => true });
+
+  try {
+    piIntercomExtension(harness.pi as never, "1.2.0");
+    await harness.emitLifecycle("session_start");
+    const worker = await waitForSessionByName(planner, "trigger-turn-worker");
+
+    assert.equal((await planner.send(worker.id, { messageId: "trigger-turn", text: "Handle this now" })).delivered, true);
+    await waitForCondition(() => harness.sentMessages.length === 1, "injected message");
+    assert.deepEqual(harness.sentMessages[0]?.options, { triggerTurn: true });
+    assert.deepEqual(harness.userMessages, []);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("an idle wake sent by another extension covers intercom messages, and intercom's wake blocks theirs", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { planner, cleanup } = await setupClients();
