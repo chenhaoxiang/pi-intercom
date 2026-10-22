@@ -3,7 +3,7 @@ import { VERSION } from "@earendil-works/pi-coding-agent";
 export function supportsNativeCustomTurns(version: string = VERSION): boolean {
   const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(version.trim());
   if (!match) return false;
-  return (Number(match[1]) > 1 || (Number(match[1]) === 1 && Number(match[2]) >= 3))
+  return (Number(match[1]) > 1 || (Number(match[1]) === 1 && Number(match[2]) >= 2))
     && (!match[4] || /^fork\.\d+$/.test(match[4]));
 }
 

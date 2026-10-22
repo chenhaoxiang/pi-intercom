@@ -10,6 +10,8 @@ This is the maintained fork of nicobailon/pi-intercom. Use an isolated worktree;
 
 ## Documentation map
 
+- `docs/maintenance/2026-10-22-pi14-compatibility.md`: upstream Pi 1.2 native-turn boundary, retained fork wake policy/reservations, full provider-free checks and Pi 1.4 loading/install boundaries.
+
 - `docs/maintenance/2026-10-21-sdk-baseline.md`: exact Pi 1.3 maintenance SDK/lock, host-owned runtime peers, provider-free regressions and source-only delivery boundaries.
 
 - [Runtime versions and safe convergence](docs/maintenance/2026-10-21-runtime-versions.md): loaded-version metadata, legacy broker compatibility, bounded non-triggering advice and safe-idle activation limits.

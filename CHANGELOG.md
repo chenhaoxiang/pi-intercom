@@ -4,6 +4,13 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.18.0-fork.3] - 2026-10-22
+
+### Changed
+- On Pi 1.2.0 or newer, a message that wakes an idle session no longer adds a "New intercom message above." line to the transcript. Older Pi still shows it, because it needs that line to run other extensions' prompt additions. Thanks to [@odfalik](https://github.com/odfalik) for #182.
+
+- Retain strict stable/fork host recognition, shared idle-wake reservation, ordinary notice silence, actionable relays and runtime-version advisories.
+
 ## [0.18.0-fork.2] - 2026-10-21
 
 - Report loaded extension/broker versions, preserve optional version metadata across legacy brokers and provide bounded safe-idle upgrade advice without changing authored messages, wake policy or process state.
