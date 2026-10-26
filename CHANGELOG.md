@@ -4,6 +4,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Fixed
+- Cross-machine sends handle early stdin closure without an unhandled EPIPE/EOF error. Failed commands retain their diagnostics, timeouts still reap the child, and incomplete input cannot report success. Adapted from [@Oscar-Williams](https://github.com/Oscar-Williams)' [upstream PR #185](https://github.com/nicobailon/pi-intercom/pull/185); no automatic send retry is added.
+
 ## [0.18.0-fork.3] - 2026-10-22
 
 ### Changed
