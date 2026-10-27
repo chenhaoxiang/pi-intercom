@@ -4,6 +4,18 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.18.1-fork.1] - 2026-10-28
+
+### Changed
+- Integrate community v0.18.1 at `02913edcd7b1bdb21b480852ff82f674d309c651` while retaining the maintained fork's delivery, wake, runtime-version and cross-machine contracts.
+- Keep the Pi 1.2+ idle-wake notice behavior from community 0.18.1 without dropping the fork's explicit/legacy wake semantics.
+
+### Added
+- Retain broker-backed `message-status-v1` queries, bounded ask waits with explicit `UNKNOWN` evidence, alternate-owner notification and CLI status queries from fork.4.
+
+### Fixed
+- Retain cross-machine stdin failure handling from fork.4: early stdin closure remains diagnostic, timeouts reap the child, and incomplete input cannot report success.
+
 ## [0.18.0-fork.4] - 2026-10-27
 
 ### Added
@@ -17,7 +29,7 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 ## [0.18.0-fork.3] - 2026-10-22
 
 ### Changed
-- On Pi 1.2.0 or newer, a message that wakes an idle session no longer adds a "New intercom message above." line to the transcript. Older Pi still shows it, because it needs that line to run other extensions' prompt additions. Thanks to [@odfalik](https://github.com/odfalik) for #182.
+- On Pi 1.2.0 or newer, a message that wakes an idle session no longer adds an extra "New intercom message above." line to the transcript. Older Pi versions still show that line, because they need it so other extensions can add to the prompt. Thanks to [@odfalik](https://github.com/odfalik) for #182.
 
 - Retain strict stable/fork host recognition, shared idle-wake reservation, ordinary notice silence, actionable relays and runtime-version advisories.
 
