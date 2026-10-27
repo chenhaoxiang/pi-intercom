@@ -130,7 +130,7 @@ Useful settings include:
 ```
 
 - `inboundTrigger`: `replies` by default; `always` preserves legacy wake-on-every-message behavior, and `never` disables automatic turns. Protocol-aware ordinary `send` messages are context-only unless `wake: true`; asks/replies still wake. Unmarked legacy senders retain implicit wake so an old task handoff is not silently ignored. New clients stamp `wakeProtocol: 1`; explicit `wake: false` wins over both defaults.
-- A send result distinguishes `attention: "context_only"` from `"wake_requested"`; collapsed tool results and inbound cards display that intent too. `status` with a `messageId` reads only the existing in-memory receipt; execution/completion remain unknown without task evidence. Neither transport delivery, injection nor an exact reply proves task start or completion. See [attention display](docs/maintenance/2026-10-20-attention-display.md). See [mixed-version compatibility](docs/maintenance/2026-10-18-legacy-wake-compatibility.md) for rollout and rollback limits.
+- A send result distinguishes `attention: "context_only"` from `"wake_requested"`; collapsed tool results and inbound cards display that intent too. `status` with a `messageId` performs a bounded broker status query and includes the latest receiver receipt when retained; missing or ambiguous records are explicitly `UNKNOWN`. Neither transport delivery, injection, an idle roster status, nor an exact reply proves task start or completion. See [bounded failure semantics](docs/maintenance/2026-10-27-bounded-failure-semantics.md), [attention display](docs/maintenance/2026-10-20-attention-display.md), and [mixed-version compatibility](docs/maintenance/2026-10-18-legacy-wake-compatibility.md].
 - `busyDelivery`: `steer` for prompt delivery, or `human-first` to wait for a safe turn boundary. This only controls delivery while busy; it does not turn ordinary status messages into new work.
 - `stableId`: optional restart-stable session identity; use a distinct value per live session; after upgrading from 0.16.x, close all Pi sessions once if they previously shared one value;
 - `confirmSend`: require UI confirmation for outbox requests;
@@ -142,7 +142,25 @@ The default blocking `ask` timeout is 10 minutes. Override it with a positive va
 export PI_INTERCOM_ASK_TIMEOUT_MS=600000
 ```
 
-Other runtime controls include `PI_INTERCOM_SCOPE_ID`, `PI_INTERCOM_STABLE_ID`, `PI_INTERCOM_LIVENESS_INTERVAL_MS`, and `PI_INTERCOM_LIVENESS_TIMEOUT_MS`.
+For one bounded request, pass `timeoutMs` to `ask`. A timeout returns `state: "UNKNOWN"`, keeps execution/completion unknown, and never replays the original ask. An explicit `escalateTo` target may receive one new `wake:true` status notification for takeover review; it is not an automatic business-action retry:
+
+```ts
+intercom({
+  action: "ask",
+  to: "primary-owner",
+  message: "Check the authorized artifact",
+  timeoutMs: 30000,
+  escalateTo: "backup-owner",
+})
+```
+
+The independent CLI status query is also available:
+
+```bash
+pi-intercom status --message-id <message-id> --json
+```
+
+Other runtime controls include `PI_INTERCOM_SCOPE_ID`, `PI_INTERCOM_STABLE_ID`, `PI_INTERCOM_LIVENESS_INTERVAL_MS`, `PI_INTERCOM_LIVENESS_TIMEOUT_MS`, and the bounded client send timeout `PI_INTERCOM_SEND_TIMEOUT_MS` (maximum 10 seconds).
 
 Invalid configuration fails closed for inbound broker auto-triggering by using `inboundTrigger: "never"` until the file is corrected.
 
@@ -162,7 +180,8 @@ Normal sessions continue to use the regular `intercom` tool. Intercom does not r
 - Client metadata such as cwd, model, PID, and status is display metadata, not authentication.
 - Scope boundaries are exact; scoped sessions do not see unscoped sessions.
 - Cancellation never pretends to remove work already injected into a Pi queue.
-- Automatic retries are not performed. Author a new message and link it with `retryOf` when a retry is intended.
+- Automatic retries are not performed. Author a new message and link it with `retryOf` when a retry is intended. Timeout/escalation creates a new status notification only; it does not replay the original business action.
+- `delivery`, receiver receipt, wake intent, idle/busy presence, execution, and business completion are separate facts. `UNKNOWN` means the outcome is not proven; do not treat it as failure or success without reconciliation.
 - Treat queued messages, session history entries, and debug/runtime files as local coordination data.
 
 ## Development

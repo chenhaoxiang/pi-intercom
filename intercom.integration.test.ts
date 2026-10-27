@@ -12,7 +12,7 @@ import type { MessageRenderer } from "@earendil-works/pi-coding-agent";
 import { InlineMessageComponent } from "./ui/inline-message.ts";
 import { ReplyTracker } from "./reply-tracker.ts";
 import { runCli } from "./cli.ts";
-import type { BrokerMessage, Message, SessionInfo } from "./types.ts";
+import type { BrokerMessage, Message, MessageStatus, SessionInfo } from "./types.ts";
 import type { SendResult } from "./broker/client.ts";
 import {
   INTERCOM_EXTENSION_REGISTER_EVENT,
@@ -429,7 +429,7 @@ test("opt-in TCP broker requires endpoint state for health and registration", { 
       type: "registered",
       sessionId: "authorized-tcp-client",
       brokerVersion: (await import("./runtime-version.ts")).LOADED_INTERCOM_VERSION,
-      features: ["extension-bus-v1", "exact-send-v1", "pending-asks-v1"],
+      features: ["extension-bus-v1", "exact-send-v1", "pending-asks-v1", "message-status-v1"],
     }]);
   } finally {
     if (broker.exitCode === null && broker.signalCode === null) {
@@ -2921,6 +2921,92 @@ test("send with exact replyTo bypasses duplicate display names without bypassing
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
   }
+});
+
+test("independent message status query reports receipt without claiming execution", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: register } = await import("./index.ts");
+  const harness = createExtensionHarness("status-idle-target", { hasUI: true, isIdle: () => true });
+  try {
+    register(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const target = await waitForSessionByName(planner, "status-idle-target");
+    const messageId = "status-idle-message";
+    assert.equal((await planner.send(target.id, { messageId, text: "Synthetic idle status check", wake: true })).delivered, true);
+    await waitForCondition(() => harness.sentMessages.length === 1, "idle receiver injection");
+    const status = await planner.getMessageStatus(messageId);
+    assert.equal(status.messageId, messageId);
+    assert.equal(status.delivery, "socket_delivered");
+    assert.equal(status.receiverReceipt?.status, "injected");
+    assert.equal(status.execution, "unknown");
+    assert.equal(status.completion, "unknown");
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("receiver receipt timeout remains UNKNOWN and is independently queryable", { concurrency: false }, async () => {
+  const { planner, cleanup } = await withEnv("PI_INTERCOM_RECEIPT_TIMEOUT_MS", "80", setupClients);
+  const silent = await connectRawRegistered("status-silent-receiver", "status-silent-receiver", { acknowledgesReceipts: true });
+  try {
+    const messageId = "status-receipt-timeout";
+    const sent = await planner.send("status-silent-receiver", { messageId, text: "Synthetic silent receiver" });
+    assert.equal(sent.delivery, "unknown");
+    assert.equal(sent.outcomeKnown, false);
+    const status = await planner.getMessageStatus(messageId);
+    assert.equal(status.delivery, "unknown");
+    assert.equal(status.outcomeKnown, false);
+    assert.equal(status.code, "E_RECEIPT_TIMEOUT");
+    assert.equal(status.execution, "unknown");
+    assert.equal(status.completion, "unknown");
+  } finally {
+    silent.socket.destroy();
+    await cleanup();
+  }
+});
+
+test("ask timeout marks UNKNOWN and sends one new bounded escalation notice", { concurrency: false }, async () => {
+  await withEnv("PI_INTERCOM_ASK_TIMEOUT_MS", "50", async () => {
+    const { planner, cleanup } = await setupClients();
+    const senderHarness = createExtensionHarness("bounded-ask-sender", { sessionId: "bounded-ask-sender" });
+    const targetHarness = createExtensionHarness("bounded-ask-target", { sessionId: "bounded-ask-target", hasUI: true, isIdle: () => true });
+    const alternateHarness = createExtensionHarness("bounded-ask-alternate", { sessionId: "bounded-ask-alternate", hasUI: true, isIdle: () => true });
+    try {
+      const { default: piIntercomExtension } = await import("./index.ts");
+      piIntercomExtension(senderHarness.pi as never);
+      piIntercomExtension(targetHarness.pi as never);
+      piIntercomExtension(alternateHarness.pi as never);
+      await senderHarness.emitLifecycle("session_start");
+      await targetHarness.emitLifecycle("session_start");
+      await alternateHarness.emitLifecycle("session_start");
+      await waitForSessionByName(planner, "bounded-ask-target");
+      await waitForSessionByName(planner, "bounded-ask-alternate");
+      const intercomTool = senderHarness.tools.find((tool) => tool.name === "intercom")!;
+      const result = await intercomTool.execute("bounded-ask-timeout", {
+        action: "ask",
+        to: "bounded-ask-target",
+        message: "Synthetic bounded ask",
+        timeoutMs: 50,
+        escalateTo: "bounded-ask-alternate",
+      }, new AbortController().signal, undefined, senderHarness.ctx);
+      assert.equal(result.details?.state, "UNKNOWN");
+      assert.equal(result.details?.code, "E_ASK_TIMEOUT");
+      assert.equal(result.details?.execution, "unknown");
+      assert.equal(result.details?.completion, "unknown");
+      assert.match(result.content[0]?.text ?? "", /Outcome: UNKNOWN/);
+      await waitForCondition(() => alternateHarness.sentMessages.length === 1, "alternate escalation notice");
+      const escalationText = alternateHarness.sentMessages[0]?.message.content ?? "";
+      assert.match(escalationText, /new status notification, not a replay/);
+      assert.match(escalationText, /Execution\/completion: UNKNOWN/);
+      assert.equal(targetHarness.sentMessages.length, 1, "the original ask is sent once only");
+    } finally {
+      await senderHarness.emitLifecycle("session_shutdown");
+      await targetHarness.emitLifecycle("session_shutdown");
+      await alternateHarness.emitLifecycle("session_shutdown");
+      await cleanup();
+    }
+  });
 });
 
 test("idle inbound asks include an exact replyTo hint", { concurrency: false }, async () => {

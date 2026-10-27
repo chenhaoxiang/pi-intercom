@@ -6,6 +6,7 @@
  *   npx --yes tsx ~/.pi/agent/npm/node_modules/pi-intercom/cli.ts list [--json]
  *   npx --yes tsx ~/.pi/agent/npm/node_modules/pi-intercom/cli.ts send --to worker --text "build failed" [--name <bridge-name>] [--json]
  *   npx --yes tsx ~/.pi/agent/npm/node_modules/pi-intercom/cli.ts ask --to worker --text "status?" [--timeout-ms N] [--name <bridge-name>] [--json]
+ *   npx --yes tsx ~/.pi/agent/npm/node_modules/pi-intercom/cli.ts status --message-id <id> [--json]
  *
  * The CLI registers as a regular session, so it shows up in the roster and
  * replies can be routed back to it while it stays connected (`ask`).
@@ -33,15 +34,16 @@ import { sendCrossMachine, type CrossMachineDelivery } from "./cross-machine-tra
 import { parseCrossMachineTarget } from "./cross-machine-discovery.ts";
 import type { CrossMachineProvenance, Message, SessionInfo, SessionRegistration } from "./types.ts";
 
-export const CLI_USAGE = `usage: pi-intercom <list|send|ask> [--to <name|session-id>] [--text <message>]
-                        [--timeout-ms <n>] [--name <session-name>] [--json]`;
+export const CLI_USAGE = `usage: pi-intercom <list|send|ask|status> [--to <name|session-id>] [--text <message>]
+                        [--message-id <id>] [--timeout-ms <n>] [--name <session-name>] [--json]`;
 
 export const DEFAULT_ASK_TIMEOUT_MS = 120_000;
 
 export interface CliOptions {
-  command: "list" | "send" | "ask" | "relay";
+  command: "list" | "send" | "ask" | "status" | "relay";
   to: string | null;
   text: string | null;
+  messageId: string | null;
   envelopeStdin: boolean;
   timeoutMs: number;
   name: string;
@@ -55,6 +57,7 @@ export function parseCliArgs(argv: readonly string[]): CliOptions {
     command: null as unknown as CliOptions["command"],
     to: null,
     text: null,
+    messageId: null,
     envelopeStdin: false,
     timeoutMs: DEFAULT_ASK_TIMEOUT_MS,
     name: "pi-intercom-cli",
@@ -62,7 +65,7 @@ export function parseCliArgs(argv: readonly string[]): CliOptions {
   };
 
   const [command, ...rest] = argv;
-  if (command !== "list" && command !== "send" && command !== "ask" && command !== "relay") {
+  if (command !== "list" && command !== "send" && command !== "ask" && command !== "status" && command !== "relay") {
     throw new CliUsageError(`unknown command: ${String(command)}\n${CLI_USAGE}`);
   }
   opts.command = command;
@@ -92,6 +95,8 @@ export function parseCliArgs(argv: readonly string[]): CliOptions {
       opts.to = value;
     } else if (arg === "--text") {
       opts.text = value;
+    } else if (arg === "--message-id") {
+      opts.messageId = value;
     } else if (arg === "--name") {
       opts.name = value;
     } else if (arg === "--timeout-ms") {
@@ -112,7 +117,10 @@ export function parseCliArgs(argv: readonly string[]): CliOptions {
     }
   } else {
     if (opts.envelopeStdin) throw new CliUsageError(`--envelope-stdin is only valid for relay\n${CLI_USAGE}`);
-    if (opts.command !== "list") {
+    if (opts.command === "status") {
+      if (!opts.messageId) throw new CliUsageError(`--message-id is required for status\n${CLI_USAGE}`);
+      if (opts.to || opts.text) throw new CliUsageError(`status accepts only --message-id (and --json/--name)\n${CLI_USAGE}`);
+    } else if (opts.command !== "list") {
       if (!opts.to) throw new CliUsageError(`--to is required for ${opts.command}\n${CLI_USAGE}`);
       if (!opts.text) throw new CliUsageError(`--text is required for ${opts.command}\n${CLI_USAGE}`);
     }
@@ -127,6 +135,7 @@ export interface CliClient {
   connect(session: SessionRegistration, sessionId?: string): Promise<void>;
   listSessions(options?: { timeoutMs?: number }): Promise<SessionInfo[]>;
   send(to: string, options: { text: string; expectsReply?: boolean; wake?: boolean; crossMachine?: CrossMachineProvenance }): Promise<{ id: string; delivered: boolean; reason?: string }>;
+  getMessageStatus?(messageId: string): Promise<import("./types.ts").MessageStatus>;
   on(event: "message", listener: (from: SessionInfo, message: Message) => void): unknown;
   disconnect(): Promise<void>;
 }
@@ -209,6 +218,14 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
           out.write(`${row.name}\t${row.id.slice(0, 8)}\t${row.model}\t${row.status}\t${row.cwd}\n`);
         }
       }
+      return 0;
+    }
+
+    if (opts.command === "status") {
+      if (!deps.client.getMessageStatus) return reportFailure("independent message status is unavailable in this client", 1, "unsupported");
+      const status = await deps.client.getMessageStatus(opts.messageId as string);
+      if (opts.json) out.write(`${JSON.stringify({ ok: true, status }, null, 2)}\n`);
+      else out.write(`${status.messageId}\t${status.delivery}\t${status.receiverReceipt?.status ?? "none"}\t${status.replyState}\texecution=unknown\tcompletion=unknown\n`);
       return 0;
     }
 

@@ -11,7 +11,7 @@ import { ComposeOverlay, type ComposeResult } from "./ui/compose.ts";
 import { InlineMessageComponent } from "./ui/inline-message.ts";
 import { getAskTimeoutMs, getIntercomScopeId, loadConfig, setIntercomScopeId, type IntercomConfig } from "./config.ts";
 import { EXTENSION_BUS_FEATURE } from "./types.ts";
-import type { Attachment, BrokerMessage, Message, MessageControl, MessageReceiptStatus, PendingAsk, SessionInfo, SessionRegistration } from "./types.ts";
+import type { Attachment, BrokerMessage, Message, MessageControl, MessageReceiptStatus, MessageStatus, PendingAsk, SessionInfo, SessionRegistration } from "./types.ts";
 import {
   INTERCOM_EXTENSION_REGISTER_EVENT,
   INTERCOM_EXTENSION_REGISTRY_READY_EVENT,
@@ -121,6 +121,16 @@ interface PrefixSend {
 }
 
 const BLOCKING_ASK_GUIDANCE = "Blocking asks are not queued; use send for a non-blocking mailbox delivery or retry after the session reconnects.";
+const MAX_ASK_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+const ESCALATION_SEND_TIMEOUT_MS = 5_000;
+
+class IntercomAskTimeoutError extends Error {
+  readonly code = "E_ASK_TIMEOUT";
+  constructor(readonly messageId: string, readonly timeoutMs: number, message: string) {
+    super(message);
+    this.name = "IntercomAskTimeoutError";
+  }
+}
 
 interface OutboxTarget {
   id: string;
@@ -199,6 +209,7 @@ function deliveryDetails(result: SendResult): Record<string, unknown> {
     messageId: result.id,
     delivered: result.delivered,
     delivery: result.delivery,
+    ...(result.delivery === "unknown" || !result.outcomeKnown ? { state: "UNKNOWN" } : {}),
     execution: "unknown",
     completion: "unknown",
     retryable: result.retryable,
@@ -206,6 +217,30 @@ function deliveryDetails(result: SendResult): Record<string, unknown> {
     ...(result.code ? { code: result.code } : {}),
     ...(result.reason ? { reason: result.reason } : {}),
   };
+}
+
+function messageStatusDetails(status: MessageStatus): Record<string, unknown> {
+  return {
+    messageId: status.messageId,
+    delivery: status.delivery,
+    ...(status.delivery === "unknown" || !status.outcomeKnown ? { state: "UNKNOWN" } : {}),
+    outcomeKnown: status.outcomeKnown,
+    retryable: status.retryable,
+    execution: "unknown",
+    completion: "unknown",
+    replyState: status.replyState,
+    ...(status.receiverReceipt ? { receiverReceipt: status.receiverReceipt } : {}),
+    ...(status.code ? { code: status.code } : {}),
+    ...(status.reason ? { reason: status.reason } : {}),
+    ...(status.createdAt ? { createdAt: status.createdAt } : {}),
+    ...(status.updatedAt ? { updatedAt: status.updatedAt } : {}),
+  };
+}
+
+function formatMessageStatus(status: MessageStatus): string {
+  const receipt = status.receiverReceipt?.status ?? "none";
+  const state = status.delivery === "unknown" || !status.outcomeKnown ? "UNKNOWN" : status.delivery;
+  return `Message ${status.messageId}: transport=${state}; receiver receipt=${receipt}; reply=${status.replyState}; execution/completion=unknown`;
 }
 
 function toError(error: unknown): Error {
@@ -843,7 +878,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     resolve: (message: Message) => void;
     reject: (error: Error) => void;
   } | null = null;
-  function waitForReply(from: string, replyTo: string, signal?: AbortSignal, cancelOnAbort?: () => void, getDeliveryState: () => string = () => "unknown"): Promise<Message> {
+  function waitForReply(from: string, replyTo: string, signal?: AbortSignal, cancelOnAbort?: () => void, getDeliveryState: () => string = () => "unknown", timeoutMs = askTimeoutMs): Promise<Message> {
     if (replyWaiter) {
       return Promise.reject(new Error("Already waiting for a reply"));
     }
@@ -852,9 +887,9 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     }
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
-        const timeoutDescription = askTimeoutMs % 60000 === 0 ? `${askTimeoutMs / 60000} minutes` : `${askTimeoutMs}ms`;
-        rejectReplyWaiter(new Error(`No reply from "${from}" for message ${replyTo} within ${timeoutDescription}. Last known delivery state: ${getDeliveryState()}. This waiter timeout is not cancellation; the delivered message may still be queued or actionable in the recipient session.`));
-      }, askTimeoutMs);
+        const timeoutDescription = timeoutMs % 60000 === 0 ? `${timeoutMs / 60000} minutes` : `${timeoutMs}ms`;
+        rejectReplyWaiter(new IntercomAskTimeoutError(replyTo, timeoutMs, `No reply from "${from}" for message ${replyTo} within ${timeoutDescription}. Last known delivery state: ${getDeliveryState()}. This waiter timeout is not cancellation; the delivered message may still be queued or actionable in the recipient session.`));
+      }, timeoutMs);
       const cleanup = () => {
         clearTimeout(timeout);
         signal?.removeEventListener("abort", onAbort);
@@ -1757,6 +1792,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     signal: AbortSignal | undefined;
     onAttempt: (askId: string) => void;
     deliveryState: () => string;
+    timeoutMs?: number;
   }): Promise<PrefixSend & { reply: Promise<Message> }> {
     let reply!: Promise<Message>;
     const sent = await sendWithNamePrefixFallback(activeClient, target, async (attemptTo) => {
@@ -1769,7 +1805,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       if (replyWaiter) throw new Error("Already waiting for a reply");
       const askId = randomUUID();
       wait.onAttempt(askId);
-      reply = waitForReply(attemptTo, askId, wait.signal, () => activeClient.cancelAsk(askId), wait.deliveryState);
+      reply = waitForReply(attemptTo, askId, wait.signal, () => activeClient.cancelAsk(askId), wait.deliveryState, wait.timeoutMs ?? askTimeoutMs);
       reply.catch(() => undefined);
       const result = await activeClient.send(attemptTo, { ...payload, messageId: askId, expectsReply: true });
       if (!result.delivered) {
@@ -1780,6 +1816,98 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     });
     return { ...sent, reply };
   }
+  async function queryMessageStatusBounded(activeClient: IntercomClient, messageId: string, fallbackDelivery: string): Promise<MessageStatus> {
+    try {
+      return await activeClient.getMessageStatus(messageId, { timeoutMs: Math.min(ESCALATION_SEND_TIMEOUT_MS, 2000) });
+    } catch (error) {
+      return {
+        messageId,
+        delivery: fallbackDelivery === "queued" || fallbackDelivery === "socket_delivered" || fallbackDelivery === "failed" ? fallbackDelivery : "unknown",
+        outcomeKnown: false,
+        retryable: true,
+        execution: "unknown",
+        completion: "unknown",
+        replyState: "unknown",
+        code: "E_STATUS_QUERY_FAILED",
+        reason: `Independent status query failed: ${getErrorMessage(error)}; outcome remains UNKNOWN.`,
+        updatedAt: Date.now(),
+      };
+    }
+  }
+
+  async function escalateAskTimeout(activeClient: IntercomClient, options: {
+    fallbackTo?: string;
+    originalTarget: string;
+    messageId: string;
+    timeoutMs: number;
+    status: MessageStatus;
+  }): Promise<Record<string, unknown>> {
+    if (!options.fallbackTo) return {};
+    const fallback = options.fallbackTo.trim();
+    if (!fallback) return { escalation: { state: "not_requested" } };
+    if (fallback.toLowerCase() === options.originalTarget.toLowerCase()) {
+      return { escalation: { state: "rejected", code: "E_ESCALATION_SAME_TARGET", target: fallback } };
+    }
+    if (fallback === activeClient.sessionId) {
+      return { escalation: { state: "rejected", code: "E_ESCALATION_SELF_TARGET", target: fallback } };
+    }
+
+    const escalationText = [
+      "[Intercom escalation — new status notification, not a replay]",
+      `Original ask to ${options.originalTarget} timed out after ${options.timeoutMs}ms.`,
+      `Original messageId: ${options.messageId}`,
+      `Original transport: ${formatMessageStatus(options.status)}`,
+      "Execution/completion: UNKNOWN. The original request body is intentionally not replayed. Inspect the original message status before taking over; do not assume the original action did not run.",
+    ].join("\n");
+    try {
+      const firstTarget = await resolveSessionTarget(activeClient, fallback) ?? fallback;
+      const escalationId = randomUUID();
+      const result = await new Promise<SendResult>((resolve, reject) => {
+        const timer = setTimeout(() => resolve({
+          id: escalationId,
+          delivered: false,
+          delivery: "unknown",
+          retryable: true,
+          outcomeKnown: false,
+          code: "E_ESCALATION_TIMEOUT",
+          reason: `Escalation delivery was not confirmed within ${ESCALATION_SEND_TIMEOUT_MS}ms; it may still arrive.`,
+        }), ESCALATION_SEND_TIMEOUT_MS);
+        activeClient.send(firstTarget, { messageId: escalationId, text: escalationText, wake: true }).then(
+          (sent) => { clearTimeout(timer); resolve(sent); },
+          (error) => { clearTimeout(timer); reject(error); },
+        );
+      });
+      if (!result.delivered) {
+        return {
+          escalation: {
+            state: "unknown",
+            target: fallback,
+            ...deliveryDetails(result),
+            reason: result.reason ?? "Escalation delivery was not confirmed.",
+          },
+        };
+      }
+      return {
+        escalation: {
+          state: result.delivery === "queued" ? "queued" : "sent",
+          target: fallback,
+          ...deliveryDetails(result),
+          note: "Escalation is a new status notification; the original ask was not replayed.",
+        },
+      };
+    } catch (error) {
+      return {
+        escalation: {
+          state: "unknown",
+          target: fallback,
+          code: "E_ESCALATION_FAILED",
+          reason: getErrorMessage(error),
+          outcome: "UNKNOWN",
+        },
+      };
+    }
+  }
+
   function editDistance(a: string, b: string): number {
     let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
     for (let i = 1; i <= a.length; i++) {
@@ -2699,7 +2827,8 @@ Usage:
   intercom({ action: "cancel", messageId: "..." })                 → Request cancellation of a sent message
   intercom({ action: "reply", replyTo: "message-id", message: "..." }) → Reply to that exact inbound ask; use its displayed replyTo command
   intercom({ action: "pending" })                                      → List unresolved inbound asks
-  intercom({ action: "status" })                  → Show connection status`,
+  intercom({ action: "status" })                  → Show connection status
+  intercom({ action: "status", messageId: "..." }) → Query retained transport receipt; execution stays UNKNOWN`,
     promptSnippet:
       "Use to coordinate with other local pi sessions: list peers, send updates, ask for help, or check intercom connectivity.",
 
@@ -2726,7 +2855,15 @@ Usage:
         description: "Exact inbound ask message ID from its displayed reply command. Use this when answering an ask; multiple pending asks must be disambiguated.",
       })),
       messageId: Type.Optional(Type.String({
-        description: "Message ID for cancel, or status to inspect an already-observed outbound receipt without inferring task completion.",
+        description: "Message ID for cancel, or status to query an independent retained transport receipt. Missing records are UNKNOWN; execution/completion are never inferred.",
+      })),
+      timeoutMs: Type.Optional(Type.Integer({
+        minimum: 1,
+        maximum: MAX_ASK_TIMEOUT_MS,
+        description: "Ask-only local reply wait bound in milliseconds. On timeout the original ask is UNKNOWN and is never replayed.",
+      })),
+      escalateTo: Type.Optional(Type.String({
+        description: "Ask-only explicit alternate owner target. On timeout sends one new status notification with wake:true; it does not replay the original ask or prove execution.",
       })),
       supersedes: Type.Optional(Type.String({
         description: "Previous message ID this send/ask explicitly supersedes. Only works for the same sender and receiver.",
@@ -2761,7 +2898,7 @@ Usage:
       const localAdvice = runtimeAdvisory(selectedLocalRuntimeVersion(), "selection");
       if (localAdvice) pi.sendMessage({ customType: "intercom-runtime-advisory", content: localAdvice, display: true }, { triggerTurn: false });
 
-      const { action, to, message, wake, attachments, replyTo, messageId, supersedes, retryOf, cwd, openProjectPaneIfMissing, focus } = params;
+      const { action, to, message, wake, attachments, replyTo, messageId, timeoutMs, escalateTo, supersedes, retryOf, cwd, openProjectPaneIfMissing, focus } = params;
 
       switch (action) {
         case "list": {
@@ -2936,8 +3073,22 @@ Usage:
               details: { error: true },
             };
           }
+          const askWaitMs = timeoutMs ?? askTimeoutMs;
+          if (!Number.isSafeInteger(askWaitMs) || askWaitMs <= 0 || askWaitMs > MAX_ASK_TIMEOUT_MS) {
+            return {
+              content: [{ type: "text", text: `Ask timeoutMs must be a positive integer no greater than ${MAX_ASK_TIMEOUT_MS}ms.` }],
+              details: { error: true, code: "E_INVALID_ASK_TIMEOUT" },
+            };
+          }
+          if (escalateTo !== undefined && (typeof escalateTo !== "string" || !escalateTo.trim())) {
+            return {
+              content: [{ type: "text", text: "escalateTo must be a non-empty alternate owner target." }],
+              details: { error: true, code: "E_INVALID_ESCALATION_TARGET" },
+            };
+          }
           let deliveryState = "created";
           let questionId: string | null = null;
+          let askTargetForFailure = to ?? cwd ?? "target";
 
           try {
             if (openProjectPaneIfMissing && !cwd) {
@@ -2954,6 +3105,7 @@ Usage:
             }
             const sendTo = target.id;
             const targetDisplay = target.projectPane ? target.label : to ?? target.label;
+            askTargetForFailure = targetDisplay;
             if (_signal?.aborted) {
               return {
                 content: [{ type: "text", text: "Cancelled" }],
@@ -2976,6 +3128,7 @@ Usage:
               signal: _signal,
               onAttempt: (askId) => { questionId = askId; },
               deliveryState: () => latestDeliveryState(questionId, deliveryState),
+              timeoutMs: askWaitMs,
             });
             const { result: sendResult, display: askTarget, resolution } = sent;
 
@@ -3017,6 +3170,30 @@ Usage:
             };
           } catch (error) {
             if (questionId) rejectReplyWaiter(toError(error), questionId);
+            if (error instanceof IntercomAskTimeoutError && questionId) {
+              const status = await queryMessageStatusBounded(connectedClient, questionId, latestDeliveryState(questionId, deliveryState));
+              const escalation = await escalateAskTimeout(connectedClient, {
+                fallbackTo: escalateTo,
+                originalTarget: askTargetForFailure,
+                messageId: questionId,
+                timeoutMs: askWaitMs,
+                status,
+              });
+              const receipt = status.receiverReceipt?.status ?? latestDeliveryState(questionId, deliveryState);
+              return {
+                content: [{ type: "text", text: `Ask to "${askTargetForFailure}" timed out after ${askWaitMs}ms (message ${questionId}). Outcome: UNKNOWN. Last known delivery state: ${receipt}. This waiter timeout is not cancellation; the original message may still be queued or actionable. Execution/completion remain unknown.${status.reason ? `\nStatus: ${status.reason}` : ""}${escalation.escalation ? `\nEscalation: ${JSON.stringify(escalation.escalation)}` : ""}` }],
+                details: {
+                  error: true,
+                  state: "UNKNOWN",
+                  code: "E_ASK_TIMEOUT",
+                  timeoutMs: askWaitMs,
+                  messageId: questionId,
+                  deliveryState: receipt,
+                  ...messageStatusDetails(status),
+                  ...escalation,
+                },
+              };
+            }
             return {
               content: [{ type: "text", text: `Failed: ${getErrorMessage(error)}` }],
               details: { error: true, ...(questionId ? { messageId: questionId, deliveryState: latestDeliveryState(questionId, deliveryState) } : {}) },
@@ -3121,16 +3298,21 @@ Usage:
             const mySessionId = connectedClient.sessionId;
             const sessions = observeRoster(await connectedClient.listSessions());
             const pool = getIntercomScopeId();
-            const receipt = messageId ? latestOutboundReceipts.get(messageId) : undefined;
-            const observation = messageId ? `\nMessage: ${messageId}\nReceipt: ${receipt?.status ?? "unknown"}\nExecution/completion: unknown (transport receipts are not task outcomes)` : "";
+            const localReceipt = messageId ? latestOutboundReceipts.get(messageId) : undefined;
+            const queriedStatus = messageId
+              ? await queryMessageStatusBounded(connectedClient, messageId, localReceipt?.status ?? "unknown")
+              : undefined;
+            const observation = queriedStatus
+              ? `\n${formatMessageStatus(queriedStatus)}${queriedStatus.reason ? `\nReason: ${queriedStatus.reason}` : ""}`
+              : "";
             const mySession = sessions.find((session) => session.id === mySessionId);
             const shortId = (mySessionId ?? "unknown").slice(0, 8);
             return {
               content: [{
                 type: "text",
-                text: `**Intercom status:**\nConnected: Yes\nLoaded runtime: ${runtimeLabel(LOADED_INTERCOM_VERSION)}\nBroker runtime: ${runtimeLabel(connectedClient.brokerVersion)} (separate process; reload does not restart it)\nSession ID: ${mySessionId}\nSession name: ${mySession?.name ?? "(unnamed)"} (short id: ${shortId})${pool ? `\nPool: ${pool}` : ""}\nActive sessions: ${sessions.length}${observation}`,
+                text: `**Intercom status:**\nConnected: Yes\nLoaded runtime: ${runtimeLabel(LOADED_INTERCOM_VERSION)}\nBroker runtime: ${runtimeLabel(connectedClient.brokerVersion)} (separate process; reload does not restart it)\nSession ID: ${mySessionId}\nSession name: ${mySession?.name ?? "(unnamed)"} (short id: ${shortId})${pool ? `\nPool: ${pool}` : ""}\nActive sessions: ${sessions.length}${observation}\nExecution/completion: unknown (transport receipts are not task outcomes)`,
               }],
-              details: messageId ? { messageId, receipt: receipt?.status ?? "unknown", execution: "unknown", completion: "unknown" } : {},
+              details: queriedStatus ? { receipt: queriedStatus.receiverReceipt?.status ?? localReceipt?.status ?? "unknown", ...messageStatusDetails(queriedStatus) } : {},
             };
           } catch (error) {
             return {

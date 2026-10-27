@@ -1,6 +1,7 @@
 export const EXTENSION_BUS_FEATURE = "extension-bus-v1";
 export const EXACT_SEND_FEATURE = "exact-send-v1";
 export const PENDING_ASKS_FEATURE = "pending-asks-v1";
+export const MESSAGE_STATUS_FEATURE = "message-status-v1";
 /** Broker refused a register because another live process holds the session id. */
 export const SESSION_HELD_ERROR_CODE = "E_SESSION_HELD";
 
@@ -149,6 +150,24 @@ export interface MessageReceipt {
   detail?: string;
 }
 
+export type MessageReplyState = "not_requested" | "pending" | "answered" | "expired" | "unknown";
+
+/** Broker-observed transport state only. Execution and business completion are always unknown here. */
+export interface MessageStatus {
+  messageId: string;
+  delivery: DeliveryState;
+  outcomeKnown: boolean;
+  retryable: boolean;
+  execution: "unknown";
+  completion: "unknown";
+  replyState: MessageReplyState;
+  createdAt?: number;
+  updatedAt?: number;
+  code?: string;
+  reason?: string;
+  receiverReceipt?: MessageReceipt;
+}
+
 export type MessageControlAction = "cancel" | "supersede";
 
 export interface MessageControl {
@@ -180,6 +199,7 @@ export type ClientMessage =
   | { type: "extension_capabilities_update"; extensions: ExtensionCapability[] }
   | { type: "list"; requestId: string }
   | { type: "pending_asks"; requestId: string; version: 1 }
+  | { type: "message_status"; requestId: string; messageId: string; version: 1 }
   | { type: "send"; to: string; message: Message; targetId?: string; targetEpoch?: string }
   | { type: "message_receipt"; receipt: MessageReceipt }
   | { type: "cancel_message"; messageId: string }
@@ -205,6 +225,7 @@ export type BrokerMessage =
   | { type: "registered"; sessionId: string; features?: string[]; brokerVersion?: string }
   | { type: "sessions"; requestId: string; sessions: SessionInfo[] }
   | { type: "pending_asks"; requestId: string; version: 1; asks: PendingAsk[] }
+  | { type: "message_status"; requestId: string; version: 1; status: MessageStatus }
   | { type: "message"; from: SessionInfo; message: Message }
   | { type: "presence_update"; session: SessionInfo }
   | { type: "session_joined"; session: SessionInfo }

@@ -12,7 +12,7 @@ import {
   type CliClient,
 } from "./cli.ts";
 import { parseCrossMachineTarget } from "./cross-machine-discovery.ts";
-import type { CrossMachineProvenance, Message, SessionInfo, SessionRegistration } from "./types.ts";
+import type { CrossMachineProvenance, Message, MessageStatus, SessionInfo, SessionRegistration } from "./types.ts";
 
 class MemorySink {
   chunks: string[] = [];
@@ -32,6 +32,8 @@ interface FakeClientOptions {
   sendError?: Error;
   connectError?: Error;
   listError?: Error;
+  status?: MessageStatus;
+  statusError?: Error;
 }
 
 class FakeClient implements CliClient {
@@ -79,6 +81,19 @@ class FakeClient implements CliClient {
     return this.options.sendResult ?? { id: "sent-1", delivered: true };
   }
 
+  async getMessageStatus(messageId: string): Promise<MessageStatus> {
+    if (this.options.statusError) throw this.options.statusError;
+    return this.options.status ?? {
+      messageId,
+      delivery: "unknown",
+      outcomeKnown: false,
+      retryable: false,
+      execution: "unknown",
+      completion: "unknown",
+      replyState: "unknown",
+    };
+  }
+
   on(_event: "message", listener: (from: SessionInfo, message: Message) => void): unknown {
     this.listeners.push(listener);
     return this;
@@ -121,6 +136,14 @@ test("parseCliArgs parses send options", () => {
 test("parseCliArgs parses ask timeout", () => {
   const opts = parseCliArgs(["ask", "--to", "worker", "--text", "?", "--timeout-ms", "5000"]);
   assert.equal(opts.timeoutMs, 5000);
+});
+
+test("parseCliArgs accepts independent status queries", () => {
+  const opts = parseCliArgs(["status", "--message-id", "message-1", "--json"]);
+  assert.equal(opts.command, "status");
+  assert.equal(opts.messageId, "message-1");
+  assert.equal(opts.to, null);
+  assert.equal(opts.text, null);
 });
 
 test("parseCliArgs rejects unknown commands and options", () => {
@@ -185,6 +208,25 @@ test("runCli list prints roster rows", async () => {
   assert.match(out.text(), /^worker\t01234567\ttest-model\t\?\t\/repo\n$/);
   assert.equal(err.text(), "");
   assert.equal(client.disconnected, true);
+});
+
+test("runCli status reports transport receipt without claiming execution", async () => {
+  const out = new MemorySink();
+  const status: MessageStatus = {
+    messageId: "message-1",
+    delivery: "socket_delivered",
+    outcomeKnown: true,
+    retryable: false,
+    execution: "unknown",
+    completion: "unknown",
+    replyState: "pending",
+    receiverReceipt: { messageId: "message-1", status: "injected", timestamp: 2 },
+  };
+  const code = await runCli(["status", "--message-id", "message-1", "--json"], {
+    client: new FakeClient({ status }), out, err: new MemorySink(),
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(JSON.parse(out.text()), { ok: true, status });
 });
 
 test("runCli list --json emits machine-readable roster", async () => {

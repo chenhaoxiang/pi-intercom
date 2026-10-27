@@ -4,6 +4,13 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.18.0-fork.4] - 2026-10-27
+
+### Added
+- Add broker-backed `message-status-v1` queries that expose retained receiver receipts and reply state without inferring execution or business completion.
+- Bound ask waits with per-request `timeoutMs`; return explicit `UNKNOWN` evidence and optionally notify one alternate owner without replaying the original business action.
+- Add CLI status queries and document the delivery/receipt/execution boundary.
+
 ### Fixed
 - Cross-machine sends handle early stdin closure without an unhandled EPIPE/EOF error. Failed commands retain their diagnostics, timeouts still reap the child, and incomplete input cannot report success. Adapted from [@Oscar-Williams](https://github.com/Oscar-Williams)' [upstream PR #185](https://github.com/nicobailon/pi-intercom/pull/185); no automatic send retry is added.
 

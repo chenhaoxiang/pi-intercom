@@ -18,8 +18,8 @@ import {
 } from "./paths.ts";
 import { getAskTimeoutMs } from "../config.ts";
 import { sameCwd } from "../cwd.ts";
-import { EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, PENDING_ASKS_FEATURE, SESSION_HELD_ERROR_CODE } from "../types.ts";
-import type { DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl, PendingAsk, MessageReceiptStatus } from "../types.ts";
+import { EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, MESSAGE_STATUS_FEATURE, PENDING_ASKS_FEATURE, SESSION_HELD_ERROR_CODE } from "../types.ts";
+import type { DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl, MessageReplyState, MessageReceipt, MessageReceiptStatus, MessageStatus, PendingAsk } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
 import { LOADED_INTERCOM_VERSION } from "../runtime-version.ts";
 import { assertNoLiveBroker } from "./runtime-claim.ts";
@@ -101,7 +101,12 @@ interface DeliveryRecord {
   reason?: string;
   code?: string;
   retryable: boolean;
+  expectsReply: boolean;
+  targetKey?: string;
+  replyState: MessageReplyState;
+  receiverReceipt?: MessageReceipt;
   createdAt: number;
+  updatedAt: number;
 }
 
 interface NamespaceOwner {
@@ -586,7 +591,7 @@ class IntercomBroker {
           type: "registered",
           sessionId: id,
           brokerVersion: LOADED_INTERCOM_VERSION,
-          features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, PENDING_ASKS_FEATURE],
+          features: [EXTENSION_BUS_FEATURE, EXACT_SEND_FEATURE, PENDING_ASKS_FEATURE, MESSAGE_STATUS_FEATURE],
         });
         this.broadcast({ type: "session_joined", session: info }, key, scopeId);
 
@@ -723,6 +728,23 @@ class IntercomBroker {
         break;
       }
 
+      case "message_status": {
+        if (typeof clientMessage.requestId !== "string" || clientMessage.version !== 1 || typeof clientMessage.messageId !== "string" || !clientMessage.messageId.trim()) {
+          throw new Error("Invalid message_status message");
+        }
+        const requester = currentKey ? this.sessions.get(currentKey) : undefined;
+        if (!requester || requester.socket !== socket || !currentKey) {
+          throw new Error("Message status session not found");
+        }
+        writeMessage(socket, {
+          type: "message_status",
+          requestId: clientMessage.requestId,
+          version: 1,
+          status: this.getMessageStatus(currentKey, requester.scopeId, clientMessage.messageId),
+        });
+        break;
+      }
+
       case "send": {
         if (!currentKey) {
           throw new Error("Received send before register");
@@ -764,12 +786,12 @@ class IntercomBroker {
           }
           const exactTarget = this.sessions.get(scopedSessionKey(fromSession.scopeId, targetId));
           if (!exactTarget) {
-            this.recordDelivery(currentKey, message.id, fingerprint, "failed", "Session not found", "E_TARGET_NOT_FOUND");
+            this.recordDelivery(currentKey, message.id, fingerprint, "failed", "Session not found", "E_TARGET_NOT_FOUND", false, targetId, message.expectsReply === true);
             this.writeDeliveryFailure(socket, message.id, "Session not found", "E_TARGET_NOT_FOUND");
             break;
           }
           if (exactTarget.info.endpointEpoch !== targetEpoch) {
-            this.recordDelivery(currentKey, message.id, fingerprint, "failed", "Target endpoint changed before delivery", "E_TARGET_REBOUND", true);
+            this.recordDelivery(currentKey, message.id, fingerprint, "failed", "Target endpoint changed before delivery", "E_TARGET_REBOUND", true, targetId, message.expectsReply === true);
             this.writeDeliveryFailure(socket, message.id, "Target endpoint changed before delivery", "E_TARGET_REBOUND", true);
             break;
           }
@@ -911,7 +933,7 @@ class IntercomBroker {
           }
           this.queueMailboxMessage(fromSession, disconnectedTarget, message, brokerReceivedAt);
           this.releaseReplyEdge(message.replyTo, fromSession.scopeId);
-          this.recordDelivery(currentKey, message.id, fingerprint, "queued");
+          this.recordDelivery(currentKey, message.id, fingerprint, "queued", undefined, undefined, false, disconnectedTarget.key, message.expectsReply === true);
           this.writeDeliverySuccess(socket, message.id, "queued");
           break;
         }
@@ -936,8 +958,16 @@ class IntercomBroker {
         const receiver = this.sessions.get(currentKey);
         const route = this.messageReceiptRoutes.get(scopedMessageKey(receiver?.scopeId, clientMessage.receipt.messageId));
         const sender = route ? this.sessions.get(route.from) : undefined;
-        if (route?.to === currentKey && receiver?.socket === socket && RECEIPT_PROOF_STATUSES.has(clientMessage.receipt.status)) {
-          this.confirmPendingReceipt(this.deliveryRecordKey(route.from, clientMessage.receipt.messageId), socket);
+        if (route?.to === currentKey && receiver?.socket === socket && sender) {
+          const deliveryKey = this.deliveryRecordKey(route.from, clientMessage.receipt.messageId);
+          const record = this.deliveryRecords.get(deliveryKey);
+          if (record) {
+            record.receiverReceipt = clientMessage.receipt;
+            record.updatedAt = Date.now();
+          }
+          if (RECEIPT_PROOF_STATUSES.has(clientMessage.receipt.status)) {
+            this.confirmPendingReceipt(deliveryKey, socket);
+          }
         }
         if (route?.to === currentKey && receiver?.socket === socket && sender) {
           writeMessage(sender.socket, {
@@ -1184,7 +1214,16 @@ class IntercomBroker {
 
   private releaseReplyEdge(replyTo: string | undefined, scopeId: string | undefined): void {
     if (!replyTo) return;
-    this.askEdges.delete(scopedMessageKey(scopeId, replyTo));
+    const edgeKey = scopedMessageKey(scopeId, replyTo);
+    const edge = this.askEdges.get(edgeKey);
+    if (edge) {
+      const record = this.deliveryRecords.get(this.deliveryRecordKey(edge.from, replyTo));
+      if (record) {
+        record.replyState = "answered";
+        record.updatedAt = Date.now();
+      }
+    }
+    this.askEdges.delete(edgeKey);
     this.removePendingAskRecord(replyTo, scopeId);
   }
 
@@ -1193,12 +1232,12 @@ class IntercomBroker {
   private completeSocketDelivery(senderSocket: net.Socket, fromKey: string, scopeId: string | undefined, target: ConnectedSession, message: Message, fingerprint: string): void {
     if (!target.acknowledgesReceipts) {
       this.releaseReplyEdge(message.replyTo, scopeId);
-      this.recordDelivery(fromKey, message.id, fingerprint, "socket_delivered");
+      this.recordDelivery(fromKey, message.id, fingerprint, "socket_delivered", undefined, undefined, false, target.key, message.expectsReply === true);
       this.writeDeliverySuccess(senderSocket, message.id, "socket_delivered");
       return;
     }
     const key = this.deliveryRecordKey(fromKey, message.id);
-    this.recordDelivery(fromKey, message.id, fingerprint, "unknown");
+    this.recordDelivery(fromKey, message.id, fingerprint, "unknown", undefined, undefined, true, target.key, message.expectsReply === true);
     const timer = setTimeout(() => {
       this.failPendingReceipt(key, `Receiver did not confirm receipt within ${RECEIPT_TIMEOUT_MS}ms`, "E_RECEIPT_TIMEOUT");
     }, RECEIPT_TIMEOUT_MS);
@@ -1235,6 +1274,7 @@ class IntercomBroker {
     this.pendingReceipts.delete(key);
     // An unconfirmed ask keeps its edge, so a receiver that was only slow can still
     // reply. pruneAskEdges expires it after the ask timeout if no reply comes.
+    this.updateDeliveryRecord(pending.fromKey, pending.messageId, "unknown", reason, code, true);
     if (pending.senderSocket.writable) {
       writeMessage(pending.senderSocket, { type: "delivery_failed", messageId: pending.messageId, reason, delivery: "unknown", code, retryable: true, outcomeKnown: false });
     }
@@ -1292,20 +1332,25 @@ class IntercomBroker {
     return true;
   }
 
-  private recordDelivery(fromSessionId: string, messageId: string, fingerprint: string, state: DeliveryState, reason?: string, code?: string, retryable = false): void {
+  private recordDelivery(fromSessionId: string, messageId: string, fingerprint: string, state: DeliveryState, reason?: string, code?: string, retryable = false, targetKey?: string, expectsReply = false): void {
     this.pruneDeliveryRecords();
     while (this.deliveryRecords.size >= MAX_DELIVERY_RECORDS) {
       const oldest = this.deliveryRecords.keys().next().value;
       if (oldest === undefined) break;
       this.deliveryRecords.delete(oldest);
     }
+    const now = Date.now();
     this.deliveryRecords.set(this.deliveryRecordKey(fromSessionId, messageId), {
       fingerprint,
       state,
       ...(reason ? { reason } : {}),
       ...(code ? { code } : {}),
       retryable,
-      createdAt: Date.now(),
+      expectsReply,
+      replyState: expectsReply ? "pending" : "not_requested",
+      ...(targetKey ? { targetKey } : {}),
+      createdAt: now,
+      updatedAt: now,
     });
   }
 
@@ -1315,13 +1360,67 @@ class IntercomBroker {
     }
   }
 
-  private updateDeliveryRecord(fromSessionId: string, messageId: string, state: DeliveryState, reason?: string, code?: string): void {
+  private updateDeliveryRecord(fromSessionId: string, messageId: string, state: DeliveryState, reason?: string, code?: string, retryable = false): void {
     const record = this.deliveryRecords.get(this.deliveryRecordKey(fromSessionId, messageId));
     if (!record) return;
     record.state = state;
     record.reason = reason;
     record.code = code;
-    record.retryable = false;
+    record.retryable = retryable;
+    record.updatedAt = Date.now();
+    if (state === "unknown") {
+      record.replyState = record.expectsReply ? "unknown" : record.replyState;
+    } else if (state === "failed") {
+      record.replyState = record.expectsReply ? "expired" : record.replyState;
+    }
+  }
+
+  private getMessageStatus(fromKey: string, scopeId: string | undefined, messageId: string): MessageStatus {
+    this.pruneDeliveryRecords();
+    this.pruneAskEdges();
+    this.pruneMessageReceiptRoutes();
+    const record = this.deliveryRecords.get(this.deliveryRecordKey(fromKey, messageId));
+    if (record) {
+      return {
+        messageId,
+        delivery: record.state,
+        outcomeKnown: record.state !== "unknown",
+        retryable: record.retryable,
+        execution: "unknown",
+        completion: "unknown",
+        replyState: record.replyState,
+        ...(record.createdAt ? { createdAt: record.createdAt } : {}),
+        ...(record.updatedAt ? { updatedAt: record.updatedAt } : {}),
+        ...(record.code ? { code: record.code } : {}),
+        ...(record.reason ? { reason: record.reason } : {}),
+        ...(record.receiverReceipt ? { receiverReceipt: record.receiverReceipt } : {}),
+      };
+    }
+
+    let requesterId: string | undefined;
+    try {
+      const parsed: unknown = JSON.parse(fromKey);
+      if (Array.isArray(parsed) && typeof parsed[1] === "string") requesterId = parsed[1];
+    } catch {
+      // The caller's session key is broker-owned and should always parse; fail closed below.
+    }
+    const pendingAsk = requesterId
+      ? this.listPendingAskRecords(requesterId, scopeId).find((ask) => ask.messageId === messageId)
+      : undefined;
+    return {
+      messageId,
+      delivery: "unknown",
+      outcomeKnown: false,
+      retryable: false,
+      execution: "unknown",
+      completion: "unknown",
+      replyState: pendingAsk ? "pending" : "unknown",
+      code: "E_STATUS_UNKNOWN",
+      reason: pendingAsk
+        ? "The broker retained a pending ask but not its original delivery record; transport and execution are UNKNOWN."
+        : "No retained delivery record; transport and execution are UNKNOWN. Do not replay the original action automatically.",
+      ...(pendingAsk ? { createdAt: pendingAsk.createdAt, updatedAt: pendingAsk.createdAt } : { updatedAt: Date.now() }),
+    };
   }
 
   private flushMailboxForSession(session: ConnectedSession, now = Date.now()): void {
@@ -1390,6 +1489,11 @@ class IntercomBroker {
       if (now - edge.createdAt > this.askTimeoutMs) {
         this.askEdges.delete(edgeKey);
         const messageId = this.messageIdFromScopedKey(edgeKey);
+        const record = this.deliveryRecords.get(this.deliveryRecordKey(edge.from, messageId));
+        if (record) {
+          record.replyState = "expired";
+          record.updatedAt = now;
+        }
         this.removePendingAskRecord(messageId, edge.scopeId);
       }
     }

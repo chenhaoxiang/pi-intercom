@@ -125,7 +125,7 @@ broker 首次使用时自动启动，空闲且邮箱无待投递消息后退出�
 ```
 
 - `inboundTrigger`：默认是 `replies`；`always` 保留旧的“每条消息都唤醒”行为，`never` 关闭自动回合。新版协议的普通 `send` 默认只作为上下文，需要任务关注时显式传 `wake: true`，ask/reply 仍会唤醒。没有协议标识的旧发送端保留隐式唤醒，避免旧任务交接被静默忽略；新客户端逐条携带 `wakeProtocol: 1`，显式 `wake: false` 优先于两种默认行为；
-- 发送结果用 `attention: "context_only"` / `"wake_requested"` 区分上下文通知与唤醒请求；传输送达或请求唤醒均不证明已开工。[混合版本兼容说明](docs/maintenance/2026-10-18-legacy-wake-compatibility.md)明确激活与回退边界；
+- 发送结果用 `attention: "context_only"` / `"wake_requested"` 区分上下文通知与唤醒请求；`status` 携带 `messageId` 时会向 broker 做有界独立状态查询，保留的接收回执会一并返回；缺失或歧义记录明确标记为 `UNKNOWN`。传输送达、注入、空闲 roster 状态或请求唤醒均不证明已开工。[有界失败语义](docs/maintenance/2026-10-27-bounded-failure-semantics.md)与[混合版本兼容说明](docs/maintenance/2026-10-18-legacy-wake-compatibility.md)明确边界；
 - `busyDelivery`：`steer` 立即交给当前提示，或 `human-first` 等待安全的 turn 边界。它只控制忙碌时的投递，不会把普通状态消息变成新任务；
 - `stableId`：可选的重启稳定会话身份；每个活跃会话使用独立值；从 0.16.x 升级且此前共用该值时，待任务结束再关闭全部 Pi 会话一次；
 - `confirmSend`：发送前是否要求 UI 确认；
@@ -137,7 +137,25 @@ broker 首次使用时自动启动，空闲且邮箱无待投递消息后退出�
 export PI_INTERCOM_ASK_TIMEOUT_MS=600000
 ```
 
-其他运行时参数包括 `PI_INTERCOM_SCOPE_ID`、`PI_INTERCOM_STABLE_ID`、`PI_INTERCOM_LIVENESS_INTERVAL_MS` 和 `PI_INTERCOM_LIVENESS_TIMEOUT_MS`。
+单次请求可传 `timeoutMs` 设置有界等待。超时会返回 `state: "UNKNOWN"`，执行/完成仍未知，不会重放原 ask。可显式传 `escalateTo` 指定替代 owner；超时后最多发送一条新的 `wake:true` 状态通知供接管判断，不会自动重做业务动作：
+
+```ts
+intercom({
+  action: "ask",
+  to: "primary-owner",
+  message: "检查已授权产物",
+  timeoutMs: 30000,
+  escalateTo: "backup-owner",
+})
+```
+
+也可以用独立 CLI 查询保留的传输状态：
+
+```bash
+pi-intercom status --message-id <message-id> --json
+```
+
+其他运行时参数包括 `PI_INTERCOM_SCOPE_ID`、`PI_INTERCOM_STABLE_ID`、`PI_INTERCOM_LIVENESS_INTERVAL_MS`、`PI_INTERCOM_LIVENESS_TIMEOUT_MS`，以及有界的客户端发送超时 `PI_INTERCOM_SEND_TIMEOUT_MS`（最多 10 秒）。
 
 配置无效时会对 broker 入站自动触发采取 fail-closed 行为，暂时使用 `inboundTrigger: "never"`，直到修正配置文件。
 
@@ -157,7 +175,8 @@ export PI_INTERCOM_ASK_TIMEOUT_MS=600000
 - cwd、模型、PID、状态等客户端信息是展示元数据，不是认证凭据；
 - 路由域边界严格生效，scoped 会话看不到 unscoped 会话；
 - 取消不会假装撤回已经注入 Pi 队列的工作；
-- 不执行自动重试。需要重试时应编写新消息，并用 `retryOf` 关联原消息；
+- 不执行自动重试。需要重试时应编写新消息，并用 `retryOf` 关联原消息；超时升级只创建新的状态通知，不重放原业务动作；
+- `delivery`、接收回执、wake 意图、空闲/忙碌状态、execution 和业务完成是不同事实。`UNKNOWN` 只表示没有证据，不等于成功或失败，必须先对账；
 - 队列消息、会话历史和调试/运行时文件都属于本地协作数据，应妥善保护。
 
 ## 开发
