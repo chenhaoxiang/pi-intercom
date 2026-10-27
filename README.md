@@ -10,7 +10,7 @@ Direct 1:1 messaging between Pi sessions on the same machine. This repository is
 
 ## Releases and branch policy
 
-The current published and installed maintained release is **0.18.0-fork.3** (published rollback baseline **0.18.0-fork.2**), based on community **0.18.0**; verify the matching immutable Release before installation. Fork releases use `<community-version>-fork.<revision>`; the fork revision increases without pretending to be a new upstream release.
+The current source/release candidate is **0.18.1-fork.1**, based on community **0.18.1**; the previous **0.18.0-fork.4** remains available for rollback. Verify the matching immutable Release before installation. Fork releases use `<community-version>-fork.<revision>`; the fork revision increases without pretending to be a new upstream release.
 
 - `main`: our maintained integration and release branch, including fork fixes.
 - `upstream-main`: an exact mirror of the community's `main`, with no fork commits. Never install from this branch.
@@ -19,7 +19,7 @@ The current published and installed maintained release is **0.18.0-fork.3** (pub
 Install a reproducible release:
 
 ```bash
-pi install git:github.com/chenhaoxiang/pi-intercom@v0.18.0-fork.3
+pi install git:github.com/chenhaoxiang/pi-intercom@v0.18.1-fork.1
 ```
 
 [GitHub Releases](https://github.com/chenhaoxiang/pi-intercom/releases) include the installable package tarball, a provenance manifest, and `SHA256SUMS`. These GitHub releases are not npm publications under the upstream author's namespace. See [release maintenance](docs/releasing.md) for asset installation and future releases.
@@ -81,7 +81,7 @@ Ctrl+O still expands or collapses every message and clears per-message choices. 
 
 The fork keeps the original intercom UX and adds reliability boundaries needed for long-running local Pi sessions:
 
-- community 0.18.0 adds virtual-model handovers, unique-name-prefix diagnostics, accurate queued/expired receipts and mailbox-aware broker lifetime;
+- community 0.18.1 keeps the Pi 1.2+ idle-wake notice concise; community 0.18.0 added virtual-model handovers, unique-name-prefix diagnostics, accurate queued/expired receipts and mailbox-aware broker lifetime;
 - retained community 0.17.1 fixes: Windows state persistence, bounded stalled-peer queues and ask-preferred bare replies, retaining 0.17.0 pool isolation, receiver-confirmed delivery and reconnect behavior;
 - durable `ask` / `reply` routing across broker restarts and Pi reloads; if a sender loses the original delivery receipt, a same-ID replay remains an unconfirmed outcome and a retry must use a new message ID;
 - explicit message IDs, sender sequences, timestamps, delivery states, and reply hints;

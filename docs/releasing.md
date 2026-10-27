@@ -22,7 +22,7 @@ Applies only to chenhaoxiang/pi-intercom. The community project remains [nicobai
 
 ## Baseline for this release
 
-The current published and installed release is **0.18.0-fork.3**, integrating released community **0.18.0** plus the Pi 1.2 native-turn follow-up `8f0750b`. Previous published **0.18.0-fork.2** remains available for rollback. See [the synchronization report](maintenance/2026-10-21-community-sync.md) for retained contracts and provider-free validation. Exact publication, fresh-download and installed-byte acceptance are recorded by the matching immutable Release; source metadata alone is not proof of runtime activation.
+The current source candidate is **0.18.1-fork.1**, integrating community **0.18.1** at `02913edcd7b1bdb21b480852ff82f674d309c651`. Previous **0.18.0-fork.4** remains available for rollback. See [the 0.18.1 synchronization report](maintenance/2026-10-28-community-0.18.1.md) for retained contracts and provider-free validation. Exact publication, fresh-download and installed-byte acceptance are recorded by the matching immutable Release; source metadata alone is not proof of runtime activation.
 
 ## Publish every version
 
