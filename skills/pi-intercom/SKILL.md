@@ -379,11 +379,19 @@ Replies to recently disconnected explicitly named senders can be queued by the b
 
 **Ask timeout**
 ```typescript
-// The ask will reject with a timeout error
-// Default: 10 minutes
-// Override: set PI_INTERCOM_ASK_TIMEOUT_MS to a positive millisecond value
-// For longer tasks, use send + follow-up ask pattern
+// Bound one request explicitly; a timeout returns state: "UNKNOWN".
+const result = await intercom({
+  action: "ask",
+  to: "worker",
+  message: "Check the authorized artifact",
+  timeoutMs: 30_000,
+  escalateTo: "backup-owner",
+});
+// The original ask is never replayed. escalateTo sends one new status-only
+// wake notification so the alternate owner can reconcile before takeover.
+// Default: 10 minutes; PI_INTERCOM_ASK_TIMEOUT_MS sets the session default.
 ```
+A timeout, receiver receipt, idle presence, or wake request does not prove execution or business completion. Query the retained transport evidence independently with `intercom({ action: "status", messageId: "..." })`; missing records remain `UNKNOWN`.
 
 ## Troubleshooting
 
@@ -396,11 +404,14 @@ Replies to recently disconnected explicitly named senders can be queued by the b
 ### Message not delivered
 
 ```typescript
-const result = await intercom({ action: "send", to: "worker", message: "..." });
+const result = await intercom({ action: "send", to: "worker", message: "...", wake: true });
 if (!result.delivered) {
-  console.log("Failed:", result.reason);
-  // → "Session not found" or delivery failure reason
+  console.log("Delivery is not confirmed:", result.reason, result.messageId);
+  // delivery: "unknown" means the message may still arrive; do not retry
+  // the same message id or infer execution/completion.
 }
+const status = await intercom({ action: "status", messageId: result.messageId });
+// status is an independent broker query; execution/completion stay unknown.
 ```
 
 ### Connection lost

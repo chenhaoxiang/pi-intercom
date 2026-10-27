@@ -5,6 +5,7 @@ import type {
   MessageProvenance,
   MessageReceipt,
   MessageReceiptStatus,
+  MessageStatus,
   PendingAsk,
   SessionInfo,
   SessionRegistration,
@@ -71,6 +72,32 @@ export function isMessageReceipt(value: unknown): value is MessageReceipt {
     return false;
   }
   return value.detail === undefined || typeof value.detail === "string";
+}
+
+function isDeliveryState(value: unknown): value is MessageStatus["delivery"] {
+  return value === "socket_delivered" || value === "queued" || value === "failed" || value === "unknown";
+}
+
+export function isMessageStatus(value: unknown): value is MessageStatus {
+  if (!isRecord(value)
+    || typeof value.messageId !== "string"
+    || !isDeliveryState(value.delivery)
+    || typeof value.outcomeKnown !== "boolean"
+    || typeof value.retryable !== "boolean"
+    || value.execution !== "unknown"
+    || value.completion !== "unknown"
+    || (value.replyState !== "not_requested"
+      && value.replyState !== "pending"
+      && value.replyState !== "answered"
+      && value.replyState !== "expired"
+      && value.replyState !== "unknown")) {
+    return false;
+  }
+  return (value.createdAt === undefined || Number.isSafeInteger(value.createdAt))
+    && (value.updatedAt === undefined || Number.isSafeInteger(value.updatedAt))
+    && (value.code === undefined || typeof value.code === "string")
+    && (value.reason === undefined || typeof value.reason === "string")
+    && (value.receiverReceipt === undefined || isMessageReceipt(value.receiverReceipt));
 }
 
 export function isMessageControl(value: unknown): value is MessageControl {

@@ -3,10 +3,10 @@ import net from "net";
 import { randomUUID } from "crypto";
 import { writeMessage, createMessageReader } from "./framing.ts";
 import { getBrokerConnectTarget, type BrokerConnectTarget } from "./paths.ts";
-import { isMessage, isMessageControl, isMessageReceipt, isPendingAsk, isSessionInfo } from "./protocol.ts";
+import { isMessage, isMessageControl, isMessageReceipt, isMessageStatus, isPendingAsk, isSessionInfo } from "./protocol.ts";
 import { getIntercomScopeId } from "../config.ts";
 import { normalizeRuntimeVersion } from "../runtime-version.ts";
-import { EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, PENDING_ASKS_FEATURE, SESSION_HELD_ERROR_CODE, type DeliveryDetails } from "../types.ts";
+import { EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, MESSAGE_STATUS_FEATURE, PENDING_ASKS_FEATURE, SESSION_HELD_ERROR_CODE, type DeliveryDetails, type MessageStatus } from "../types.ts";
 import type {
   Attachment,
   BrokerMessage,
@@ -55,6 +55,11 @@ function getLivenessTimeoutMs(): number {
   return Number.isSafeInteger(raw) && raw > 0 ? Math.min(raw, getLivenessIntervalMs()) : 5_000;
 }
 
+function getSendTimeoutMs(): number {
+  const raw = Number.parseInt(process.env.PI_INTERCOM_SEND_TIMEOUT_MS ?? "", 10);
+  return Number.isSafeInteger(raw) && raw > 0 ? Math.min(raw, 10_000) : 10_000;
+}
+
 function connectToBrokerTarget(target: BrokerConnectTarget): net.Socket {
   return typeof target === "string"
     ? net.connect(target)
@@ -86,6 +91,7 @@ export class IntercomClient extends EventEmitter {
   private pendingSends = new Map<string, { resolve: (r: SendResult) => void; reject: (e: Error) => void }>();
   private pendingLists = new Map<string, { resolve: (sessions: SessionInfo[]) => void; reject: (e: Error) => void }>();
   private pendingAskLists = new Map<string, { resolve: (asks: PendingAsk[]) => void; reject: (e: Error) => void }>();
+  private pendingMessageStatuses = new Map<string, { resolve: (status: MessageStatus) => void; reject: (e: Error) => void }>();
   private nextSenderSequence = 1;
   private disconnecting = false;
   private disconnectError: Error | null = null;
@@ -93,8 +99,16 @@ export class IntercomClient extends EventEmitter {
   private livenessInFlight = false;
 
   private failPending(error: Error): void {
-    for (const pending of this.pendingSends.values()) {
-      pending.reject(error);
+    for (const [messageId, pending] of this.pendingSends) {
+      pending.resolve({
+        id: messageId,
+        delivered: false,
+        delivery: "unknown",
+        retryable: true,
+        outcomeKnown: false,
+        code: "E_CONNECTION_LOST",
+        reason: `${error.message}; delivery outcome is UNKNOWN and the message may still arrive. Do not retry the same message id.`,
+      });
     }
     this.pendingSends.clear();
     for (const pending of this.pendingLists.values()) {
@@ -105,6 +119,10 @@ export class IntercomClient extends EventEmitter {
       pending.reject(error);
     }
     this.pendingAskLists.clear();
+    for (const pending of this.pendingMessageStatuses.values()) {
+      pending.reject(error);
+    }
+    this.pendingMessageStatuses.clear();
   }
 
   get sessionId(): string | null {
@@ -381,6 +399,18 @@ export class IntercomClient extends EventEmitter {
         if (!pending) return;
         this.pendingAskLists.delete(requestId);
         pending.resolve(asks as PendingAsk[]);
+        break;
+      }
+
+      case "message_status": {
+        const { requestId, version, status } = brokerMessage;
+        if (typeof requestId !== "string" || version !== 1 || !isMessageStatus(status)) {
+          throw new Error("Invalid message status");
+        }
+        const pending = this.pendingMessageStatuses.get(requestId);
+        if (!pending) return;
+        this.pendingMessageStatuses.delete(requestId);
+        pending.resolve(status as MessageStatus);
         break;
       }
 
@@ -693,6 +723,62 @@ export class IntercomClient extends EventEmitter {
     });
   }
 
+  getMessageStatus(messageId: string, options: { timeoutMs?: number } = {}): Promise<MessageStatus> {
+    if (!messageId.trim()) {
+      return Promise.reject(new Error("Message id is required"));
+    }
+    if (!this.supportsFeature(MESSAGE_STATUS_FEATURE)) {
+      return Promise.resolve({
+        messageId,
+        delivery: "unknown",
+        outcomeKnown: false,
+        retryable: true,
+        execution: "unknown",
+        completion: "unknown",
+        replyState: "unknown",
+        code: "E_STATUS_UNSUPPORTED",
+        reason: "Connected broker does not support independent message status queries",
+        updatedAt: Date.now(),
+      });
+    }
+    let socket: net.Socket;
+    try {
+      socket = this.requireActiveSocket();
+    } catch (error) {
+      return Promise.reject(toError(error));
+    }
+    return new Promise((resolve, reject) => {
+      const requestId = randomUUID();
+      const wrappedResolve = (status: MessageStatus) => { clearTimeout(timeout); resolve(status); };
+      const wrappedReject = (error: Error) => { clearTimeout(timeout); reject(error); };
+      const timeout = setTimeout(() => {
+        if (this.pendingMessageStatuses.has(requestId)) {
+          this.pendingMessageStatuses.delete(requestId);
+          wrappedResolve({
+            messageId,
+            delivery: "unknown",
+            outcomeKnown: false,
+            retryable: true,
+            execution: "unknown",
+            completion: "unknown",
+            replyState: "unknown",
+            code: "E_STATUS_TIMEOUT",
+            reason: "Independent message status query timed out; outcome remains UNKNOWN.",
+            updatedAt: Date.now(),
+          });
+        }
+      }, options.timeoutMs ?? 5000);
+      this.pendingMessageStatuses.set(requestId, { resolve: wrappedResolve, reject: wrappedReject });
+      try {
+        writeMessage(socket, { type: "message_status", requestId, messageId, version: 1 });
+      } catch (error) {
+        clearTimeout(timeout);
+        this.pendingMessageStatuses.delete(requestId);
+        reject(toError(error));
+      }
+    });
+  }
+
   async send(to: string, options: SendOptions): Promise<SendResult> {
     let socket: net.Socket;
     try {
@@ -735,9 +821,17 @@ export class IntercomClient extends EventEmitter {
       const timeout = setTimeout(() => {
         if (this.pendingSends.has(messageId)) {
           this.pendingSends.delete(messageId);
-          wrappedReject(new Error("Send timeout"));
+          wrappedResolve({
+            id: messageId,
+            delivered: false,
+            delivery: "unknown",
+            retryable: true,
+            outcomeKnown: false,
+            code: "E_SEND_TIMEOUT",
+            reason: "Send request timed out; delivery outcome is UNKNOWN and the message may still arrive. Do not retry the same message id.",
+          });
         }
-      }, 10000);
+      }, getSendTimeoutMs());
       this.pendingSends.set(messageId, { resolve: wrappedResolve, reject: wrappedReject });
 
       try {

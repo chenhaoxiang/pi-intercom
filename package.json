@@ -45,7 +45,8 @@
     "docs/maintenance/2026-10-20-actionable-relay-wake.md",
     "docs/maintenance/2026-10-21-community-sync.md",
     "docs/maintenance/2026-10-21-runtime-versions.md",
-    "docs/maintenance/2026-10-22-pi14-compatibility.md"
+    "docs/maintenance/2026-10-22-pi14-compatibility.md",
+    "docs/maintenance/2026-10-27-bounded-failure-semantics.md"
   ],
   "scripts": {
     "test": "tsx --test test/sdk-baseline.test.mjs runtime-version.test.ts handover.test.ts herdr-location.test.ts cross-machine-envelope.test.ts cross-machine-discovery.test.ts cross-machine-transport.test.ts cross-machine-integration.test.ts cli.test.ts broker/cross-machine-provenance.test.ts broker/client.test.ts broker/client-liveness.test.ts broker/extension.test.ts broker/framing.test.ts broker/paths.test.ts broker/runtime-claim.test.ts broker/spawn.test.ts config.test.ts idle-wake.test.ts cwd.test.ts format-context.test.ts project-agent.test.ts reply-tracker.test.ts intercom.integration.test.ts human-priority.pi.test.ts test/inline-message.test.ts test/overlay-width.test.ts test/handover-picker.test.ts"
