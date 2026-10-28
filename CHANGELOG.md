@@ -4,6 +4,9 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Fixed
+- Incorporate community fixes for stale broker PID ownership/reuse, cross-machine stdin failure handling, stale-session cleanup, late replies, no-wake sends and Herdr-free SSH discovery while retaining the maintained fork contracts.
+
 ## [0.18.1-fork.5] - 2026-10-31
 
 ### Added
