@@ -1244,10 +1244,17 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     }
   }
   function createExtensionChannel(namespace: string): IntercomExtensionChannel {
-    return {
+    // A channel only acts for the registration it was created for. After
+    // unregister(), neither the old handle nor a later registration of the same
+    // namespace can be driven through it.
+    const liveExtension = () => {
+      const extension = localExtensions.get(namespace);
+      return extension?.channel === channel ? extension : undefined;
+    };
+    const channel: IntercomExtensionChannel = {
       namespace,
       snapshot() {
-        const extension = localExtensions.get(namespace);
+        const extension = liveExtension();
         return {
           connected: Boolean(client?.isConnected()),
           supported: Boolean(client?.supportsFeature(EXTENSION_BUS_FEATURE)),
@@ -1256,9 +1263,10 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         };
       },
       publish(payload, options = {}) {
+        const extension = liveExtension();
+        if (!extension) throw new Error(`Intercom extension channel is unregistered: ${namespace}`);
         const activeClient = client;
         if (!activeClient?.isConnected()) throw new Error("Intercom is not connected");
-        const extension = localExtensions.get(namespace);
         const ownerOnly = options.ownerOnly ?? false;
         const ownerEpoch = ownerOnly ? extension?.owner?.epoch : undefined;
         if (ownerOnly && !ownerEpoch) throw new Error(`No owner is available for ${namespace}`);
@@ -1271,9 +1279,10 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         });
       },
       commitState(payload, expectedRevision) {
+        const extension = liveExtension();
+        if (!extension) throw new Error(`Intercom extension channel is unregistered: ${namespace}`);
         const activeClient = client;
         if (!activeClient?.isConnected()) throw new Error("Intercom is not connected");
-        const extension = localExtensions.get(namespace);
         const ownerEpoch = extension?.owner?.epoch;
         if (!ownerEpoch || extension.owner?.sessionId !== activeClient.sessionId) {
           throw new Error(`Current session is not the owner of ${namespace}`);
@@ -1291,7 +1300,18 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         if (!activeClient?.isConnected()) throw new Error("Intercom is not connected");
         return activeClient.listSessions();
       },
+      unregister() {
+        if (!liveExtension()) return;
+        localExtensions.delete(namespace);
+        const activeClient = client;
+        // Offline or on an older broker there is nothing to withdraw: the
+        // capability list is rebuilt from localExtensions on the next register.
+        if (activeClient?.isConnected() && activeClient.supportsFeature(EXTENSION_BUS_FEATURE)) {
+          activeClient.updateExtensionCapabilities(currentExtensionCapabilities());
+        }
+      },
     };
+    return channel;
   }
   function currentExtensionCapabilities() {
     return [...localExtensions.values()].map(({ registration }) => ({
@@ -1321,11 +1341,14 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       emitLocalExtensionEvent(registration.namespace, { type: "connection", connected: true, supported });
     }
   }
+  // Whether the last register frame listed any namespace: an unregister() during the handshake must still reach the broker.
+  let registrationAdvertisedExtensions = false;
   function buildRegistration(): SessionRegistration {
     const liveContext = getLiveContext();
     if (!liveContext || !currentSessionId || sessionStartedAt === null) {
       throw new Error("Intercom runtime not initialized");
     }
+    registrationAdvertisedExtensions = localExtensions.size > 0;
 
     const identity = buildPresenceIdentity(pi, currentIntercomSessionId ?? currentSessionId);
     const tmuxPane = currentTmuxPane();
@@ -1791,7 +1814,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       switch (message.type) {
         case "registered": {
           const supported = message.features?.includes(EXTENSION_BUS_FEATURE) ?? false;
-          if (supported && localExtensions.size > 0) {
+          if (supported && (localExtensions.size > 0 || registrationAdvertisedExtensions)) {
             nextClient.updateExtensionCapabilities(currentExtensionCapabilities());
           }
           for (const namespace of localExtensions.keys()) {
