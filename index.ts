@@ -403,6 +403,17 @@ function queuedText(target: string, what = "message"): string {
   return `Session "${target}" is not connected. The ${what} is waiting in the broker mailbox until that session reconnects.`;
 }
 
+// The broker words "no open ask" ("a pending ask") differently from "an open ask between other sessions" ("the pending ask").
+function isClosedAskReply(result: SendResult): boolean {
+  return result.code === "E_REPLY_TARGET" && result.reason === "Reply target does not match a pending ask";
+}
+
+function closedAskText(target: string): string {
+  return `Reply to "${target}" was not delivered: the broker can no longer match it to an open ask, for example because the asker disconnected or the broker restarted. To deliver the content, send it as a new message without replyTo: intercom({ action: "send", to: "${target}", message: "..." }).`;
+}
+
+const LATE_REPLY_NOTE = "The ask was no longer open, so the reply was delivered as a regular message.";
+
 function deliveryDetails(result: SendResult): Record<string, unknown> {
   return {
     messageId: result.id,
@@ -415,6 +426,7 @@ function deliveryDetails(result: SendResult): Record<string, unknown> {
     outcomeKnown: result.outcomeKnown,
     ...(result.code ? { code: result.code } : {}),
     ...(result.reason ? { reason: result.reason } : {}),
+    ...(result.demoted ? { demoted: result.demoted } : {}),
   };
 }
 
@@ -894,6 +906,7 @@ function formatInboundDeliveryMetadata(message: Message): string {
   if (typeof message.senderSequence === "number") parts.push(`seq ${message.senderSequence}`);
   if (message.supersedes) parts.push(`supersedes ${message.supersedes}`);
   if (message.retryOf) parts.push(`retry of ${message.retryOf}`);
+  if (message.lateReplyTo) parts.push(`late reply to ${message.lateReplyTo}`);
   const sentAt = formatMessageTimestamp(message.timestamp);
   if (sentAt) parts.push(`sent ${sentAt}`);
   const brokerDeliveredAt = formatMessageTimestamp(message.brokerDeliveredAt);
@@ -2442,6 +2455,13 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         });
       });
       if (!result.delivered) {
+        if (effectiveReplyTo && isClosedAskReply(result)) {
+          dismissIncomingAsk(effectiveReplyTo);
+          return {
+            content: [{ type: "text", text: closedAskText(display) }],
+            details: { ...deliveryDetails(result), error: true },
+          };
+        }
         return {
           content: [{ type: "text", text: noMatchText ?? `${undeliveredText(display, result)}${resolution}` }],
           details: { ...deliveryDetails(result), ...(noMatchText ? { error: true } : {}) },
@@ -2464,7 +2484,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
             ? queuedText(display, inferredAsk ? "reply (inferred from pending ask)" : "message")
             : target.projectPane
               ? `Opened Herdr project pane ${target.projectPane.paneId} for ${target.projectPane.projectRoot} and sent message to ${targetDisplay}`
-              : inferredAsk ? `Reply sent to ${display}${resolution} (inferred from pending ask)` : `Message sent to ${display}${resolution}`,
+              : `${inferredAsk ? `Reply sent to ${display}${resolution} (inferred from pending ask)` : `Message sent to ${display}${resolution}`}${result.demoted ? `. ${LATE_REPLY_NOTE}` : ""}`,
         }, {
           type: "text",
           text: request.wake !== false && (request.wake === true || request.handover || effectiveReplyTo)
@@ -3698,7 +3718,7 @@ Usage:
               timestamp: Date.now(),
             });
             return {
-              content: [{ type: "text", text: result.delivery === "queued" ? queuedText(target.from.name || target.from.id, pendingReplyTo ? "reply" : "response") : pendingReplyTo ? `Reply sent to ${target.from.name || target.from.id}` : `Response sent to ${target.from.name || target.from.id}` }],
+              content: [{ type: "text", text: result.delivery === "queued" ? queuedText(target.from.name || target.from.id, pendingReplyTo ? "reply" : "response") : `${pendingReplyTo ? `Reply sent to ${target.from.name || target.from.id}` : `Response sent to ${target.from.name || target.from.id}`}${result.demoted ? `. ${LATE_REPLY_NOTE}` : ""}` }],
               details: { attention: "wake_requested", ...deliveryDetails(result), ...(pendingReplyTo ? { replyTo: pendingReplyTo } : {}) },
             };
           } catch (error) {
