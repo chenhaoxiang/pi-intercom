@@ -41,6 +41,7 @@ import { listMachineAgents, listSavedMachines, parseCrossMachineTarget } from ".
 import { formatHandoverMessage, generateHandoverBody, readGitState } from "./handover.ts";
 import { LOADED_INTERCOM_VERSION, runtimeLabel, selectedLocalRuntimeVersion, createRuntimeAdvisories, createPeerUpgradeAdvisories, createPeerVersionObservations } from "./runtime-version.ts";
 import { isIdleWakePending, releaseIdleWake, reserveIdleWake, supportsNativeCustomTurns } from "./idle-wake.ts";
+import { FOLLOWUP_CANCEL_TRANSPORT_EVENT, FOLLOWUP_DUE_EVENT, FOLLOWUP_OBSERVED_EVENT, requestFollowup, followupStatusText, type FollowupCancelTransportRequest, type FollowupDueRequest, type FollowupOptions, type FollowupObservation } from "./followup-api.ts";
 
 const INTERCOM_TOOL_NAME = "intercom";
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
@@ -112,6 +113,7 @@ interface PrefixTarget {
 
 interface PrefixSend {
   result: SendResult;
+  targetId?: string;
   /** The resolved session name after a prefix retry, otherwise the caller's display. */
   display: string;
   /** ` ("<raw>" resolved to "<name>")` after a prefix retry, otherwise "". */
@@ -878,6 +880,55 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     resolve: (message: Message) => void;
     reject: (error: Error) => void;
   } | null = null;
+  interface PendingFollowup {
+    binding: { ownerSessionId: string; intercomSessionId: string; peerSessionId: string; messageId: string };
+    options: FollowupOptions;
+    createPromise?: Promise<import("./followup-api.ts").FollowupResult>;
+    cancelPromise?: Promise<import("./followup-api.ts").FollowupResult>;
+    reply?: Message;
+    cancelled?: boolean;
+  }
+  const pendingFollowups = new Map<string, PendingFollowup>();
+  async function cancelFollowupForReply(messageId: string, from: SessionInfo, reply: Message): Promise<import("./followup-api.ts").FollowupResult | undefined> {
+    const pending = pendingFollowups.get(messageId);
+    if (!pending || pending.binding.peerSessionId !== from.id || reply.replyTo !== messageId) return undefined;
+    pending.reply = reply;
+    pending.cancelPromise ??= (async () => {
+      if (pending.createPromise) await pending.createPromise.catch(() => undefined);
+      return requestFollowup(pi, "cancel", pending.binding);
+    })();
+    const result = await pending.cancelPromise;
+    setTimeout(() => { if (pendingFollowups.get(messageId) === pending) pendingFollowups.delete(messageId); }, 60_000).unref?.();
+    return result;
+  }
+  function observeFollowupReply(from: SessionInfo, message: Message): void {
+    if (!message.replyTo) return;
+    const pending = pendingFollowups.get(message.replyTo);
+    if (!pending || pending.binding.peerSessionId !== from.id) return;
+    void cancelFollowupForReply(message.replyTo, from, message).catch(() => undefined);
+    try {
+      pi.events.emit(FOLLOWUP_OBSERVED_EVENT, {
+        version: 1,
+        kind: "reply",
+        ownerSessionId: pending.binding.ownerSessionId,
+        intercomSessionId: pending.binding.intercomSessionId,
+        peerSessionId: from.id,
+        messageId: message.id,
+        replyTo: message.replyTo,
+        text: message.content.text,
+        at: Date.now(),
+      } satisfies FollowupObservation);
+    } catch { /* Observation is diagnostic; exact reply still resolves the waiter. */ }
+  }
+  async function armFollowup(pending: PendingFollowup): Promise<import("./followup-api.ts").FollowupResult> {
+    pending.createPromise ??= requestFollowup(pi, "create", pending.binding, pending.options);
+    const created = await pending.createPromise;
+    if (pending.reply || pending.cancelled) {
+      pending.cancelPromise ??= requestFollowup(pi, "cancel", pending.binding);
+      return pending.cancelPromise;
+    }
+    return created;
+  }
   function waitForReply(from: string, replyTo: string, signal?: AbortSignal, cancelOnAbort?: () => void, getDeliveryState: () => string = () => "unknown", timeoutMs = askTimeoutMs): Promise<Message> {
     if (replyWaiter) {
       return Promise.reject(new Error("Already waiting for a reply"));
@@ -1499,6 +1550,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     }
     const receivedMessage = { ...message, receiverReceivedAt };
     peerVersions.observe(from, receivedMessage.intercomVersion ?? from.intercomVersion);
+    observeFollowupReply(from, receivedMessage);
     const advice = runtimeAdvisory(receivedMessage.intercomVersion ?? from.intercomVersion, "peer");
     if (advice) pi.sendMessage({ customType: "intercom-runtime-advisory", content: advice, display: true }, { triggerTurn: false });
     emitMessageReceipt(receivedMessage.id, "receiver_received");
@@ -1627,6 +1679,17 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     nextClient.on("disconnected", (error: Error) => {
       if (client !== nextClient) {
         return;
+      }
+      for (const pending of pendingFollowups.values()) {
+        try {
+          pi.events.emit(FOLLOWUP_OBSERVED_EVENT, {
+            version: 1,
+            kind: "disconnected",
+            ownerSessionId: pending.binding.ownerSessionId,
+            intercomSessionId: pending.binding.intercomSessionId,
+            at: Date.now(),
+          } satisfies FollowupObservation);
+        } catch { /* Keep disconnect/reconnect handling independent from schedule diagnostics. */ }
       }
       rejectReplyWaiter(new Error(`Disconnected while waiting for reply: ${error.message}`, { cause: error }));
       markLocalExtensionsDisconnected();
@@ -1771,7 +1834,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     const { rawTo, firstTarget, display } = target;
     const result = await attempt(firstTarget);
     if (result.delivered || firstTarget !== rawTo || result.code !== "E_TARGET_NOT_FOUND") {
-      return { result, display, resolution: "" };
+      return { result, targetId: firstTarget, display, resolution: "" };
     }
     const sessions = await activeClient.listSessions();
     const lowerName = rawTo.toLowerCase();
@@ -1783,9 +1846,9 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     }
     const match = byNamePrefix[0];
     if (!match || match.id === activeClient.sessionId) {
-      return { result, display, resolution: "", noMatchText: describeNoSessionMatch(sessions, rawTo) };
+      return { result, targetId: firstTarget, display, resolution: "", noMatchText: describeNoSessionMatch(sessions, rawTo) };
     }
-    return { result: await attempt(match.id), display: match.name!, resolution: ` ("${rawTo}" resolved to "${match.name}")` };
+    return { result: await attempt(match.id), targetId: match.id, display: match.name!, resolution: ` ("${rawTo}" resolved to "${match.name}")` };
   }
   /** Blocking variant: each attempt registers its reply waiter before sending and releases it when refused, so a retry can register its own. */
   async function askWithNamePrefixFallback(activeClient: IntercomClient, target: PrefixTarget, payload: Omit<Parameters<IntercomClient["send"]>[1], "messageId" | "expectsReply">, wait: {
@@ -2401,6 +2464,50 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     });
   });
   const unsubscribeOutboxRequest = pi.events.on(INTERCOM_OUTBOX_REQUEST_EVENT, handleOutboxRequest);
+  const unsubscribeFollowupDue = pi.events.on(FOLLOWUP_DUE_EVENT, payload => {
+    if (!payload || typeof payload !== "object") return;
+    const request = payload as FollowupDueRequest;
+    if (request.version !== 1 || typeof request.claim !== "function" || typeof request.isCurrent !== "function" || typeof request.respond !== "function") return;
+    request.claim();
+    void (async () => {
+      const activeClient = client;
+      if (!activeClient?.isConnected() || !request.isCurrent()) {
+        request.respond({ delivered: false, unknown: true, reason: "Follow-up was cancelled, expired, or Intercom is disconnected before send" });
+        return;
+      }
+      const status = await queryMessageStatusBounded(activeClient, request.binding.messageId, "unknown");
+      if (!request.isCurrent()) {
+        request.respond({ delivered: false, unknown: true, reason: "Exact reply/cancel won the race before follow-up send" });
+        return;
+      }
+      const text = `${followupStatusText(request)}\n\nCurrent transport evidence: ${formatMessageStatus(status)}`;
+      let result: SendResult;
+      try {
+        result = await activeClient.send(request.binding.peerSessionId, { text, wake: true });
+      } catch (error) {
+        request.respond({ delivered: false, unknown: true, reason: getErrorMessage(error) });
+        return;
+      }
+      if (!request.isCurrent()) {
+        if (result.delivered) void activeClient.cancelMessage(result.id).catch(() => undefined);
+        request.respond({ delivered: false, unknown: true, messageId: result.id, reason: "Exact reply/cancel won after follow-up transport; queued wake cancellation was requested" });
+        return;
+      }
+      request.respond({ delivered: result.delivered, messageId: result.id, reason: result.reason, unknown: !result.outcomeKnown });
+    })();
+  });
+  const unsubscribeFollowupCancelTransport = pi.events.on(FOLLOWUP_CANCEL_TRANSPORT_EVENT, payload => {
+    if (!payload || typeof payload !== "object") return;
+    const request = payload as FollowupCancelTransportRequest;
+    if (request.version !== 1 || request.ownerSessionId !== currentSessionId || request.intercomSessionId !== (currentIntercomSessionId ?? currentSessionId)) return;
+    const activeClient = client;
+    if (!activeClient?.isConnected()) return;
+    void activeClient.cancelMessage(request.reminderMessageId).catch(() => undefined);
+  });
+  const unsubscribeFollowupObserved = pi.events.on(FOLLOWUP_OBSERVED_EVENT, () => {
+    // The schedule extension consumes exact observations. This listener keeps the
+    // seam registered in sessions that only load Intercom and is intentionally a no-op.
+  });
   pi.on("session_start", (_event, ctx) => {
     if (!config.enabled) {
       return;
@@ -2413,6 +2520,9 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     unsubscribeSubagentControlIntercom();
     unsubscribeSubagentResultIntercom();
     unsubscribeOutboxRequest();
+    unsubscribeFollowupDue();
+    unsubscribeFollowupCancelTransport();
+    unsubscribeFollowupObserved();
     shuttingDown = true;
     disposed = true;
     failPendingOutboxRequests(runtimeGeneration, "session_ended", "Session shutting down");
@@ -2865,6 +2975,13 @@ Usage:
       escalateTo: Type.Optional(Type.String({
         description: "Ask-only explicit alternate owner target. On timeout sends one new status notification with wake:true; it does not replay the original ask or prove execution.",
       })),
+      followUp: Type.Optional(Type.Object({
+        afterMs: Type.Integer({ minimum: 1000, maximum: 86400000, description: "Finite delay before one status-only follow-up reminder." }),
+        expiresAt: Type.String({ description: "Absolute future expiry for the follow-up." }),
+        goal: Type.Optional(Type.String({ minLength: 1, description: "Goal reference; never replayed as a business action." })),
+        phase: Type.Optional(Type.String({ minLength: 1, description: "Exact checkpoint phase being followed up." })),
+        coveredBy: Type.Optional(Type.String({ description: "Existing bounded schedule id used only for dedup/readback context." })),
+      })),
       supersedes: Type.Optional(Type.String({
         description: "Previous message ID this send/ask explicitly supersedes. Only works for the same sender and receiver.",
       })),
@@ -2898,7 +3015,7 @@ Usage:
       const localAdvice = runtimeAdvisory(selectedLocalRuntimeVersion(), "selection");
       if (localAdvice) pi.sendMessage({ customType: "intercom-runtime-advisory", content: localAdvice, display: true }, { triggerTurn: false });
 
-      const { action, to, message, wake, attachments, replyTo, messageId, timeoutMs, escalateTo, supersedes, retryOf, cwd, openProjectPaneIfMissing, focus } = params;
+      const { action, to, message, wake, attachments, replyTo, messageId, timeoutMs, escalateTo, followUp, supersedes, retryOf, cwd, openProjectPaneIfMissing, focus } = params;
 
       switch (action) {
         case "list": {
@@ -3086,6 +3203,15 @@ Usage:
               details: { error: true, code: "E_INVALID_ESCALATION_TARGET" },
             };
           }
+          if (followUp) {
+            const expiresAt = Date.parse(followUp.expiresAt);
+            if (!Number.isSafeInteger(followUp.afterMs) || followUp.afterMs < 1000 || followUp.afterMs > 86400000 || !Number.isFinite(expiresAt) || expiresAt <= Date.now() || expiresAt <= Date.now() + followUp.afterMs) {
+              return {
+                content: [{ type: "text", text: "Follow-up requires afterMs 1000–86400000 and an expiresAt later than the reminder time." }],
+                details: { error: true, code: "E_INVALID_FOLLOWUP_BOUNDS" },
+              };
+            }
+          }
           let deliveryState = "created";
           let questionId: string | null = null;
           let askTargetForFailure = to ?? cwd ?? "target";
@@ -3130,7 +3256,7 @@ Usage:
               deliveryState: () => latestDeliveryState(questionId, deliveryState),
               timeoutMs: askWaitMs,
             });
-            const { result: sendResult, display: askTarget, resolution } = sent;
+            const { result: sendResult, display: askTarget, resolution, targetId: deliveredPeerId } = sent;
 
             deliveryState = sendResult.delivery;
             if (!sendResult.delivered) {
@@ -3150,7 +3276,33 @@ Usage:
               messageId: sendResult.id,
               timestamp: Date.now(),
             });
+            let followupPromise: Promise<import("./followup-api.ts").FollowupResult> | undefined;
+            if (followUp) {
+              const afterMs = followUp.afterMs;
+              const expiresAt = Date.parse(followUp.expiresAt);
+              const ownerSessionId = ctx.sessionManager.getSessionId();
+              const intercomSessionId = connectedClient.sessionId ?? currentIntercomSessionId ?? ownerSessionId;
+              const pending: PendingFollowup = {
+                binding: { ownerSessionId, intercomSessionId, peerSessionId: deliveredPeerId ?? sendTo, messageId: sendResult.id },
+                options: {
+                  requestId: _toolCallId,
+                  goal: followUp.goal ?? message,
+                  phase: followUp.phase ?? "waiting-for-reply",
+                  deadlineAt: new Date(expiresAt).toISOString(),
+                  intervalMs: afterMs,
+                  maxRuns: 1,
+                  expiresAt: new Date(expiresAt).toISOString(),
+                  ...(followUp.coveredBy ? { coveredBy: followUp.coveredBy } : {}),
+                },
+              };
+              pendingFollowups.set(sendResult.id, pending);
+              followupPromise = armFollowup(pending);
+              followupPromise.catch(() => undefined);
+            }
             const replyMessage = await sent.reply;
+            const followupReadback = questionId && followupPromise
+              ? await cancelFollowupForReply(questionId, { id: deliveredPeerId ?? sendTo, name: askTarget, cwd: "", model: "unknown", pid: 0, startedAt: 0, lastActivity: 0 }, replyMessage).catch(error => ({ ok: false, state: "unknown" as const, reason: getErrorMessage(error), completion: "unknown" as const }))
+              : undefined;
             const replyText = replyMessage.content.text;
             const replyAttachments = replyMessage.content.attachments?.length
               ? formatAttachments(replyMessage.content.attachments)
@@ -3165,6 +3317,7 @@ Usage:
               content: [{ type: "text", text: `**Reply from ${askTarget}${resolution}:**\n${replyText}${replyAttachments}` }],
               details: {
                 attention: "wake_requested",
+                ...(followupReadback ? { followUp: followupReadback } : followUp ? { followUp: { state: "pending", completion: "unknown" } } : {}),
                 ...(target.projectPane ? { openedProjectPane: true, paneId: target.projectPane.paneId, projectRoot: target.projectPane.projectRoot } : {}),
               },
             };
