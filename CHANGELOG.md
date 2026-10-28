@@ -4,6 +4,16 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.18.1-fork.2] - 2026-10-29
+
+### Added
+- Add optional `ask.followUp` composition with `pi-schedule-prompt`: exact session/request/message/goal/phase binding, finite delay/expiry and one status-only reminder.
+- Cancel only on an exact `replyTo` plus peer-session match, read back the persisted cancellation state and preserve `UNKNOWN` for create/reply/cancel races, disconnects and late replies.
+- Keep ACK/PENDING and transport/wake receipts separate from execution and business completion; never replay the original business action.
+
+### Fixed
+- Purge or reject stale queued follow-up wakeups at cancellation and re-read the persisted schedule binding immediately before status delivery.
+
 ## [0.18.1-fork.1] - 2026-10-28
 
 ### Changed
