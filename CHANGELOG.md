@@ -4,6 +4,17 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.18.1-fork.3] - 2026-10-29
+
+### Added
+- Add action-specific Intercom guidance so long-running work uses `send`/`wake: true`, while blocking `ask` is reserved for short decisions.
+- Add regression coverage for malformed optional ask controls, post-allocation cancellation, and stale reply-edge fallback.
+
+### Fixed
+- Ignore blank `escalateTo` and malformed optional `followUp` controls with explicit `parameterWarnings` while preserving the primary ask.
+- Distinguish cancellation before send (`NOT_SENT`) from post-allocation `UNKNOWN` outcomes with retained transport evidence.
+- Fall back to one exact-sender ordinary response when a delivered ask's `replyTo` edge is no longer pending, instead of leaving the response unsent.
+
 ## [0.18.1-fork.2] - 2026-10-29
 
 ### Added
