@@ -175,6 +175,94 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+interface NormalizedFollowup {
+  afterMs: number;
+  expiresAt: string;
+  goal?: string;
+  phase?: string;
+  coveredBy?: string;
+}
+
+interface NormalizedAskOptions {
+  escalateTo?: string;
+  followUp?: NormalizedFollowup;
+  warnings: string[];
+}
+
+function normalizeOptionalText(value: unknown, field: string, warnings: string[]): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string" || !value.trim()) {
+    warnings.push(`Ignored invalid ${field}; the option was omitted.`);
+    return undefined;
+  }
+  return value.trim();
+}
+
+function normalizeAskOptions(escalateTo: unknown, followUp: unknown): NormalizedAskOptions {
+  const warnings: string[] = [];
+  const normalizedEscalateTo = normalizeOptionalText(escalateTo, "escalateTo", warnings);
+  let normalizedFollowUp: NormalizedFollowup | undefined;
+
+  if (followUp !== undefined && followUp !== null) {
+    const input = typeof followUp === "object" && !Array.isArray(followUp)
+      ? followUp as Record<string, unknown>
+      : undefined;
+    const afterMs = input?.afterMs;
+    const expiresAt = input?.expiresAt;
+    const expiresAtMs = typeof expiresAt === "string" ? Date.parse(expiresAt) : Number.NaN;
+    const now = Date.now();
+    if (
+      !Number.isSafeInteger(afterMs)
+      || (afterMs as number) < 1000
+      || (afterMs as number) > 86400000
+      || !Number.isFinite(expiresAtMs)
+      || expiresAtMs <= now
+      || expiresAtMs <= now + (afterMs as number)
+    ) {
+      warnings.push("Ignored invalid followUp; the primary ask will continue without a reminder.");
+    } else {
+      const goal = normalizeOptionalText(input?.goal, "followUp.goal", warnings);
+      const phase = normalizeOptionalText(input?.phase, "followUp.phase", warnings);
+      const coveredBy = normalizeOptionalText(input?.coveredBy, "followUp.coveredBy", warnings);
+      normalizedFollowUp = {
+        afterMs: afterMs as number,
+        expiresAt: new Date(expiresAtMs).toISOString(),
+        ...(goal ? { goal } : {}),
+        ...(phase ? { phase } : {}),
+        ...(coveredBy ? { coveredBy } : {}),
+      };
+    }
+  }
+
+  return { escalateTo: normalizedEscalateTo, followUp: normalizedFollowUp, warnings };
+}
+
+function parameterWarningDetails(warnings: readonly string[]): Record<string, unknown> {
+  return warnings.length > 0 ? { parameterWarnings: [...warnings] } : {};
+}
+
+function appendParameterWarnings(text: string, warnings: readonly string[]): string {
+  return warnings.length > 0
+    ? `${text}\nParameter normalization: ${warnings.join(" ")}`
+    : text;
+}
+
+function cancelledBeforeSendResult(warnings: readonly string[]): IntercomToolResult {
+  return {
+    content: [{ type: "text", text: appendParameterWarnings("Cancelled before sending; no Intercom message was sent.", warnings) }],
+    details: {
+      error: true,
+      code: "E_INTERCOM_CANCELLED_BEFORE_SEND",
+      state: "NOT_SENT",
+      delivered: false,
+      outcomeKnown: true,
+      execution: "unknown",
+      completion: "unknown",
+      ...parameterWarningDetails(warnings),
+    },
+  };
+}
+
 export function explicitCrossMachineSendRestriction(options: {
   to?: string;
   cwd?: string;
@@ -2920,6 +3008,14 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     description: `Send a message to another pi session running on this machine.
 Use this to communicate findings, request help, or coordinate work with other sessions.
 
+Choose the action by the work shape:
+- Long-running reviews, delegation, implementation, or status notifications: use 'send' with 'wake: true' when the peer must act. Do not use blocking 'ask' for work that may take minutes.
+- Short decisions that need an immediate response: use 'ask'.
+- Replies to an inbound ask: use 'reply' with the exact 'replyTo' shown in the hint.
+- Omit optional fields entirely when they are not needed. Never send empty strings, nulls, placeholder timestamps, or an empty 'followUp' object. 'escalateTo' and 'followUp' are only for an explicitly bounded timeout/escalation plan.
+- If a call reports parameter normalization, continue with the delivered primary action. If a call is cancelled after a message id exists, inspect 'status' and do not resend the original action automatically.
+- If 'reply' reports fallback 'ordinary_send', the stale reply edge was replaced by one ordinary response; do not retry the response.
+
 Target a session by name, full session ID, or the short id shown in parentheses
 by "list" (a leading prefix of the ID is enough). Prefer the short id when two
 sessions share a name. Re-list before reusing a session ID; skip if it resolves to self.
@@ -2947,10 +3043,12 @@ Usage:
         description: "Action: 'list', 'list-cwd', 'send', 'ask', 'handover', 'reply', 'pending', 'status', or 'cancel'. 'handover' summarizes this session with the current model and sends it to the target, which acts on it; 'message' is the optional next task.",
       }),
       to: Type.Optional(Type.String({
-        description: "Target session: name, full session ID, or the short id shown in parentheses by 'list' (a leading ID prefix resolves; when no session has this exact name or ID, a leading name prefix shared by exactly one connected session also resolves, otherwise use the full name). For send/ask/handover with cwd, omit to target the sole live session in that cwd or the newly opened project-pane session. For 'reply', disambiguates the pending ask.",
+        minLength: 1,
+        description: "Target session: name, full session ID, or the short id shown in parentheses by 'list' (a leading ID prefix resolves; when no session has this exact name or ID, a leading name prefix shared by exactly one connected session also resolves, otherwise use the full name). For send/ask/handover with cwd, omit to target the sole live session in that cwd or the newly opened project-pane session. For 'reply', disambiguates the pending ask. Omit rather than passing an empty string.",
       })),
       message: Type.Optional(Type.String({
-        description: "Message to send (for 'send', 'ask', or 'reply' action). For 'handover', the optional next task for the receiver.",
+        minLength: 1,
+        description: "Message to send (for 'send', 'ask', or 'reply' action). For 'handover', the optional next task for the receiver. Must be non-empty.",
       })),
       wake: Type.Optional(Type.Boolean({
         description: "For send: true requests a non-blocking task handoff turn; false records a status notice without waking. Ordinary send defaults to context-only. Ask, reply and handover already request attention. Receiver never policy remains authoritative.",
@@ -2962,10 +3060,12 @@ Usage:
         language: Type.Optional(Type.String()),
       }))),
       replyTo: Type.Optional(Type.String({
-        description: "Exact inbound ask message ID from its displayed reply command. Use this when answering an ask; multiple pending asks must be disambiguated.",
+        minLength: 1,
+        description: "Exact inbound ask message ID from its displayed reply command. Use this when answering an ask; multiple pending asks must be disambiguated. Omit rather than passing an empty string.",
       })),
       messageId: Type.Optional(Type.String({
-        description: "Message ID for cancel, or status to query an independent retained transport receipt. Missing records are UNKNOWN; execution/completion are never inferred.",
+        minLength: 1,
+        description: "Message ID for cancel, or status to query an independent retained transport receipt. Missing records are UNKNOWN; execution/completion are never inferred. Omit rather than passing an empty string.",
       })),
       timeoutMs: Type.Optional(Type.Integer({
         minimum: 1,
@@ -2973,13 +3073,13 @@ Usage:
         description: "Ask-only local reply wait bound in milliseconds. On timeout the original ask is UNKNOWN and is never replayed.",
       })),
       escalateTo: Type.Optional(Type.String({
-        description: "Ask-only explicit alternate owner target. On timeout sends one new status notification with wake:true; it does not replay the original ask or prove execution.",
+        description: "Ask-only explicit alternate owner target. Omit unless timeout escalation was explicitly requested; an empty value is ignored. On timeout sends one new status notification with wake:true; it does not replay the original ask or prove execution.",
       })),
       followUp: Type.Optional(Type.Object({
-        afterMs: Type.Integer({ minimum: 1000, maximum: 86400000, description: "Finite delay before one status-only follow-up reminder." }),
-        expiresAt: Type.String({ description: "Absolute future expiry for the follow-up." }),
-        goal: Type.Optional(Type.String({ minLength: 1, description: "Goal reference; never replayed as a business action." })),
-        phase: Type.Optional(Type.String({ minLength: 1, description: "Exact checkpoint phase being followed up." })),
+        afterMs: Type.Optional(Type.Integer({ minimum: 1000, maximum: 86400000, description: "Finite delay before one status-only follow-up reminder. Required together with expiresAt; omit the entire object unless a bounded reminder was explicitly requested." })),
+        expiresAt: Type.Optional(Type.String({ description: "Absolute future expiry for the follow-up, later than now plus afterMs. Required together with afterMs." })),
+        goal: Type.Optional(Type.String({ description: "Goal reference; never replayed as a business action." })),
+        phase: Type.Optional(Type.String({ description: "Exact checkpoint phase being followed up." })),
         coveredBy: Type.Optional(Type.String({ description: "Existing bounded schedule id used only for dedup/readback context." })),
       })),
       supersedes: Type.Optional(Type.String({
@@ -2989,6 +3089,7 @@ Usage:
         description: "Previous message ID this send/ask is a user-authored retry of. Retries always send a new message ID.",
       })),
       cwd: Type.Optional(Type.String({
+        minLength: 1,
         description: "Working directory filter for 'list-cwd'. For send/ask/handover, scopes target lookup to that directory; omit 'to' to target the sole live peer there. Absolute, or relative to the current session's cwd; '.' means the current cwd.",
       })),
       openProjectPaneIfMissing: Type.Optional(Type.Boolean({
@@ -3184,33 +3285,20 @@ Usage:
             };
           }
 
+          const normalizedAskOptions = normalizeAskOptions(escalateTo, followUp);
+          const askEscalateTo = normalizedAskOptions.escalateTo;
+          const askFollowUp = normalizedAskOptions.followUp;
+          const parameterWarnings = normalizedAskOptions.warnings;
+
           if (_signal?.aborted) {
-            return {
-              content: [{ type: "text", text: "Cancelled" }],
-              details: { error: true },
-            };
+            return cancelledBeforeSendResult(parameterWarnings);
           }
           const askWaitMs = timeoutMs ?? askTimeoutMs;
           if (!Number.isSafeInteger(askWaitMs) || askWaitMs <= 0 || askWaitMs > MAX_ASK_TIMEOUT_MS) {
             return {
-              content: [{ type: "text", text: `Ask timeoutMs must be a positive integer no greater than ${MAX_ASK_TIMEOUT_MS}ms.` }],
-              details: { error: true, code: "E_INVALID_ASK_TIMEOUT" },
+              content: [{ type: "text", text: appendParameterWarnings(`Ask timeoutMs must be a positive integer no greater than ${MAX_ASK_TIMEOUT_MS}ms.`, parameterWarnings) }],
+              details: { error: true, code: "E_INVALID_ASK_TIMEOUT", ...parameterWarningDetails(parameterWarnings) },
             };
-          }
-          if (escalateTo !== undefined && (typeof escalateTo !== "string" || !escalateTo.trim())) {
-            return {
-              content: [{ type: "text", text: "escalateTo must be a non-empty alternate owner target." }],
-              details: { error: true, code: "E_INVALID_ESCALATION_TARGET" },
-            };
-          }
-          if (followUp) {
-            const expiresAt = Date.parse(followUp.expiresAt);
-            if (!Number.isSafeInteger(followUp.afterMs) || followUp.afterMs < 1000 || followUp.afterMs > 86400000 || !Number.isFinite(expiresAt) || expiresAt <= Date.now() || expiresAt <= Date.now() + followUp.afterMs) {
-              return {
-                content: [{ type: "text", text: "Follow-up requires afterMs 1000–86400000 and an expiresAt later than the reminder time." }],
-                details: { error: true, code: "E_INVALID_FOLLOWUP_BOUNDS" },
-              };
-            }
           }
           let deliveryState = "created";
           let questionId: string | null = null;
@@ -3233,10 +3321,7 @@ Usage:
             const targetDisplay = target.projectPane ? target.label : to ?? target.label;
             askTargetForFailure = targetDisplay;
             if (_signal?.aborted) {
-              return {
-                content: [{ type: "text", text: "Cancelled" }],
-                details: { error: true },
-              };
+              return cancelledBeforeSendResult(parameterWarnings);
             }
             if (sendTo === connectedClient.sessionId) {
               return {
@@ -3266,8 +3351,8 @@ Usage:
                   ? `Session "${askTarget}" is not currently connected. ${BLOCKING_ASK_GUIDANCE}`
                   : `${undeliveredText(askTarget, sendResult)}${resolution}`;
               return {
-                content: [{ type: "text", text: errorText }],
-                details: { error: true, ...deliveryDetails(sendResult) },
+                content: [{ type: "text", text: appendParameterWarnings(errorText, parameterWarnings) }],
+                details: { error: true, ...deliveryDetails(sendResult), ...parameterWarningDetails(parameterWarnings) },
               };
             }
             pi.appendEntry("intercom_sent", {
@@ -3277,22 +3362,22 @@ Usage:
               timestamp: Date.now(),
             });
             let followupPromise: Promise<import("./followup-api.ts").FollowupResult> | undefined;
-            if (followUp) {
-              const afterMs = followUp.afterMs;
-              const expiresAt = Date.parse(followUp.expiresAt);
+            if (askFollowUp) {
+              const afterMs = askFollowUp.afterMs;
+              const expiresAt = Date.parse(askFollowUp.expiresAt);
               const ownerSessionId = ctx.sessionManager.getSessionId();
               const intercomSessionId = connectedClient.sessionId ?? currentIntercomSessionId ?? ownerSessionId;
               const pending: PendingFollowup = {
                 binding: { ownerSessionId, intercomSessionId, peerSessionId: deliveredPeerId ?? sendTo, messageId: sendResult.id },
                 options: {
                   requestId: _toolCallId,
-                  goal: followUp.goal ?? message,
-                  phase: followUp.phase ?? "waiting-for-reply",
+                  goal: askFollowUp.goal ?? message,
+                  phase: askFollowUp.phase ?? "waiting-for-reply",
                   deadlineAt: new Date(expiresAt).toISOString(),
                   intervalMs: afterMs,
                   maxRuns: 1,
                   expiresAt: new Date(expiresAt).toISOString(),
-                  ...(followUp.coveredBy ? { coveredBy: followUp.coveredBy } : {}),
+                  ...(askFollowUp.coveredBy ? { coveredBy: askFollowUp.coveredBy } : {}),
                 },
               };
               pendingFollowups.set(sendResult.id, pending);
@@ -3314,10 +3399,11 @@ Usage:
               timestamp: replyMessage.timestamp,
             });
             return {
-              content: [{ type: "text", text: `**Reply from ${askTarget}${resolution}:**\n${replyText}${replyAttachments}` }],
+              content: [{ type: "text", text: appendParameterWarnings(`**Reply from ${askTarget}${resolution}:**\n${replyText}${replyAttachments}`, parameterWarnings) }],
               details: {
                 attention: "wake_requested",
-                ...(followupReadback ? { followUp: followupReadback } : followUp ? { followUp: { state: "pending", completion: "unknown" } } : {}),
+                ...(followupReadback ? { followUp: followupReadback } : askFollowUp ? { followUp: { state: "pending", completion: "unknown" } } : {}),
+                ...parameterWarningDetails(parameterWarnings),
                 ...(target.projectPane ? { openedProjectPane: true, paneId: target.projectPane.paneId, projectRoot: target.projectPane.projectRoot } : {}),
               },
             };
@@ -3326,7 +3412,7 @@ Usage:
             if (error instanceof IntercomAskTimeoutError && questionId) {
               const status = await queryMessageStatusBounded(connectedClient, questionId, latestDeliveryState(questionId, deliveryState));
               const escalation = await escalateAskTimeout(connectedClient, {
-                fallbackTo: escalateTo,
+                fallbackTo: askEscalateTo,
                 originalTarget: askTargetForFailure,
                 messageId: questionId,
                 timeoutMs: askWaitMs,
@@ -3334,7 +3420,7 @@ Usage:
               });
               const receipt = status.receiverReceipt?.status ?? latestDeliveryState(questionId, deliveryState);
               return {
-                content: [{ type: "text", text: `Ask to "${askTargetForFailure}" timed out after ${askWaitMs}ms (message ${questionId}). Outcome: UNKNOWN. Last known delivery state: ${receipt}. This waiter timeout is not cancellation; the original message may still be queued or actionable. Execution/completion remain unknown.${status.reason ? `\nStatus: ${status.reason}` : ""}${escalation.escalation ? `\nEscalation: ${JSON.stringify(escalation.escalation)}` : ""}` }],
+                content: [{ type: "text", text: appendParameterWarnings(`Ask to "${askTargetForFailure}" timed out after ${askWaitMs}ms (message ${questionId}). Outcome: UNKNOWN. Last known delivery state: ${receipt}. This waiter timeout is not cancellation; the original message may still be queued or actionable. Execution/completion remain unknown.${status.reason ? `\nStatus: ${status.reason}` : ""}${escalation.escalation ? `\nEscalation: ${JSON.stringify(escalation.escalation)}` : ""}`, parameterWarnings) }],
                 details: {
                   error: true,
                   state: "UNKNOWN",
@@ -3344,12 +3430,30 @@ Usage:
                   deliveryState: receipt,
                   ...messageStatusDetails(status),
                   ...escalation,
+                  ...parameterWarningDetails(parameterWarnings),
+                },
+              };
+            }
+            if (_signal?.aborted || /cancelled|aborted/i.test(getErrorMessage(error))) {
+              if (!questionId) return cancelledBeforeSendResult(parameterWarnings);
+              const status = await queryMessageStatusBounded(connectedClient, questionId, latestDeliveryState(questionId, deliveryState));
+              const receipt = status.receiverReceipt?.status ?? latestDeliveryState(questionId, deliveryState);
+              return {
+                content: [{ type: "text", text: appendParameterWarnings(`Ask wait Cancelled after message ${questionId} was allocated. Transport: ${formatMessageStatus(status)}. The original request was not resent; execution/completion remain unknown.`, parameterWarnings) }],
+                details: {
+                  error: true,
+                  state: "UNKNOWN",
+                  code: "E_ASK_CANCELLED",
+                  messageId: questionId,
+                  deliveryState: receipt,
+                  ...messageStatusDetails(status),
+                  ...parameterWarningDetails(parameterWarnings),
                 },
               };
             }
             return {
-              content: [{ type: "text", text: `Failed: ${getErrorMessage(error)}` }],
-              details: { error: true, ...(questionId ? { messageId: questionId, deliveryState: latestDeliveryState(questionId, deliveryState) } : {}) },
+              content: [{ type: "text", text: appendParameterWarnings(`Failed: ${getErrorMessage(error)}`, parameterWarnings) }],
+              details: { error: true, ...(questionId ? { messageId: questionId, deliveryState: latestDeliveryState(questionId, deliveryState) } : {}), ...parameterWarningDetails(parameterWarnings) },
             };
           }
         }
@@ -3378,6 +3482,48 @@ Usage:
               ...(pendingReplyTo ? { replyTo: pendingReplyTo } : {}),
             });
             if (!result.delivered) {
+              if (result.code === "E_REPLY_TARGET" && pendingReplyTo) {
+                // The asker may have cancelled its local waiter after the message
+                // was delivered. The reply target is then no longer a broker
+                // pending edge, but the receiver still has a valid human response.
+                // Fall back to one ordinary, exact-sender response rather than
+                // leaving the model with a misleading reply-only instruction.
+                const fallback = await connectedClient.send(target.from.id, {
+                  text: message,
+                  attachments,
+                  wake: true,
+                });
+                if (!fallback.delivered) {
+                  return {
+                    content: [{ type: "text", text: `Reply target "${pendingReplyTo}" is no longer pending and the ordinary response could not be delivered: ${undeliveredText(target.from.name || target.from.id, fallback, "Response")}` }],
+                    details: {
+                      error: true,
+                      code: "E_REPLY_FALLBACK_FAILED",
+                      replyTo: pendingReplyTo,
+                      replyTargetState: "UNKNOWN",
+                      fallback: "ordinary_send",
+                      ...deliveryDetails(fallback),
+                    },
+                  };
+                }
+                dismissIncomingAsk(pendingReplyTo);
+                pi.appendEntry("intercom_sent", {
+                  to: target.from.name || target.from.id,
+                  message: { text: message, attachments },
+                  messageId: fallback.id,
+                  timestamp: Date.now(),
+                });
+                return {
+                  content: [{ type: "text", text: `${result.reason ?? `Reply target "${pendingReplyTo}" is no longer pending`}; sent one ordinary response to ${target.from.name || target.from.id}.` }],
+                  details: {
+                    attention: "wake_requested",
+                    replyTo: pendingReplyTo,
+                    replyTargetState: "UNKNOWN",
+                    fallback: "ordinary_send",
+                    ...deliveryDetails(fallback),
+                  },
+                };
+              }
               if (result.reason === "Session not found") {
                 dismissIncomingAsk(pendingReplyTo ?? target.message.id);
               }
