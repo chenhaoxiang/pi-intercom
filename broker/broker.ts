@@ -257,7 +257,6 @@ class IntercomBroker {
 
   constructor() {
     ensureIntercomRuntimeDir(INTERCOM_DIR);
-    assertNoLiveBroker(PID_PATH);
     ensurePendingAskRecordDir();
     this.prunePendingAskRecords();
     this.rehydratePendingAskEdges();
@@ -2198,4 +2197,5 @@ class IntercomBroker {
   }
 }
 
+await assertNoLiveBroker(PID_PATH);
 new IntercomBroker().start();
