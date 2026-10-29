@@ -3009,6 +3009,116 @@ test("ask timeout marks UNKNOWN and sends one new bounded escalation notice", { 
   });
 });
 
+test("ask self-heals empty optional escalation and follow-up fields without dropping the primary message", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const senderHarness = createExtensionHarness("parameter-normalizer-sender", { sessionId: "parameter-normalizer-sender" });
+  const received: Message[] = [];
+  orchestrator.on("message", async (_from, message) => {
+    received.push(message);
+    if (message.expectsReply) {
+      await orchestrator.send(senderHarness.ctx.sessionManager.getSessionId(), { text: "Primary ask received.", replyTo: message.id });
+    }
+  });
+
+  try {
+    piIntercomExtension(senderHarness.pi as never);
+    await senderHarness.emitLifecycle("session_start");
+    await waitForSessionByName(planner, "parameter-normalizer-sender");
+    const intercomTool = senderHarness.tools.find((tool) => tool.name === "intercom")!;
+
+    const result = await intercomTool.execute("parameter-normalizer", {
+      action: "ask",
+      to: "orchestrator",
+      message: "Primary ask with malformed optional controls.",
+      escalateTo: "",
+      followUp: { afterMs: 1000, expiresAt: "" },
+    }, new AbortController().signal, undefined, senderHarness.ctx);
+
+    assert.equal(received.length, 1, "the primary ask is sent exactly once");
+    assert.equal(received[0]?.content.text, "Primary ask with malformed optional controls.");
+    assert.equal(received[0]?.expectsReply, true);
+    assert.equal(result.details?.error, undefined);
+    assert.deepEqual(result.details?.parameterWarnings, [
+      "Ignored invalid escalateTo; the option was omitted.",
+      "Ignored invalid followUp; the primary ask will continue without a reminder.",
+    ]);
+    assert.match(result.content[0]?.text ?? "", /Parameter normalization:/);
+  } finally {
+    await senderHarness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("ask cancellation after allocation returns UNKNOWN evidence instead of a bare Cancelled error", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const senderHarness = createExtensionHarness("cancel-after-allocation", { sessionId: "cancel-after-allocation" });
+  const controller = new AbortController();
+  const received = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
+
+  try {
+    piIntercomExtension(senderHarness.pi as never);
+    await senderHarness.emitLifecycle("session_start");
+    await waitForSessionByName(planner, "cancel-after-allocation");
+    const intercomTool = senderHarness.tools.find((tool) => tool.name === "intercom")!;
+    const resultPromise = intercomTool.execute("cancel-after-allocation", {
+      action: "ask",
+      to: "orchestrator",
+      message: "This ask will be cancelled after send.",
+    }, controller.signal, undefined, senderHarness.ctx);
+    const [, message] = await received;
+    assert.equal(message.expectsReply, true);
+    controller.abort();
+
+    const result = await resultPromise;
+    assert.equal(result.details?.error, true);
+    assert.equal(result.details?.code, "E_ASK_CANCELLED");
+    assert.equal(result.details?.state, "UNKNOWN");
+    assert.equal(typeof result.details?.messageId, "string");
+    assert.match(result.content[0]?.text ?? "", /original request was not resent/);
+  } finally {
+    await senderHarness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("reply falls back to one ordinary response when the delivered ask edge was cancelled", { concurrency: false }, async () => {
+  const { orchestrator, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("stale-reply-worker", { hasUI: true, isIdle: () => true });
+  const workerReplies: Message[] = [];
+  orchestrator.on("message", (_from, message) => workerReplies.push(message));
+
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const worker = await waitForSessionByName(orchestrator, "stale-reply-worker");
+    const askId = "stale-reply-fallback-ask";
+    assert.equal((await orchestrator.send(worker.id, { messageId: askId, text: "The sender may cancel this waiter.", expectsReply: true })).delivered, true);
+    await waitForCondition(() => harness.sentMessages.length === 1, "stale ask injection");
+    orchestrator.cancelAsk(askId);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    const intercomTool = harness.tools.find((tool) => tool.name === "intercom")!;
+    const result = await intercomTool.execute("stale-reply-fallback", {
+      action: "reply",
+      replyTo: askId,
+      message: "The delivered request is acknowledged.",
+    }, new AbortController().signal, undefined, harness.ctx);
+
+    assert.equal(result.details?.error, undefined);
+    assert.equal(result.details?.fallback, "ordinary_send");
+    assert.equal(result.details?.replyTargetState, "UNKNOWN");
+    await waitForCondition(() => workerReplies.some((message) => message.content.text === "The delivered request is acknowledged."), "ordinary fallback response");
+    const fallback = workerReplies.find((message) => message.content.text === "The delivered request is acknowledged.")!;
+    assert.equal(fallback.replyTo, undefined, "fallback must not claim a reply edge that no longer exists");
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("idle inbound asks include an exact replyTo hint", { concurrency: false }, async () => {
   const { default: piIntercomExtension } = await import("./index.ts");
   const { planner, cleanup } = await setupClients();

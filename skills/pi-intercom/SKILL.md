@@ -27,6 +27,18 @@ This skill covers how to handle those orchestrator-side escalations.
 
 ## Core Patterns
 
+### Parameter hygiene and self-recovery
+
+Use the smallest valid call for the requested work:
+
+- Use `send` for reviews, implementation, investigation, or any task that may take more than a short decision turn. Add `wake: true` when the peer must actively start work. Use `ask` only when an immediate answer is needed to continue this turn.
+- Use `reply` for an inbound ask and copy the exact `replyTo` shown in the message hint. Do not turn a reply into a new `ask`.
+- Omit optional fields when they are not needed. Never send `escalateTo: ""`, `followUp: {}`, nulls, placeholder timestamps, or empty IDs. `escalateTo` and `followUp` are advanced timeout/reminder controls, not defaults for ordinary messages.
+- A `followUp` is valid only when `afterMs` is between 1000 and 86400000 and `expiresAt` is a real future ISO timestamp later than the reminder time. Do not invent one for a normal delegation.
+- If the tool returns `parameterWarnings`, the primary action was normalized and should not be sent again. If it returns `E_ASK_CANCELLED` or `state: "UNKNOWN"` with a `messageId`, call `status` first and never blindly resend the original message.
+- If `reply` reports `fallback: "ordinary_send"`, the original ask edge was no longer pending (for example, the asker cancelled its waiter after delivery). The response was already sent once; do not retry it.
+- If a call fails before a message id is created with a parameter error, self-correct once by removing unsupported/empty optional fields and retry with the minimal payload. Do not ask the user to repair a tool call that can be corrected locally.
+
 ### Pattern 1: Planner-Worker Delegation
 
 The most common pattern. One session holds the big picture, others do hands-on work.
