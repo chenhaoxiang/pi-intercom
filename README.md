@@ -170,6 +170,8 @@ Other runtime controls include `PI_INTERCOM_SCOPE_ID`, `PI_INTERCOM_STABLE_ID`, 
 
 Invalid configuration fails closed for inbound broker auto-triggering by using `inboundTrigger: "never"` until the file is corrected.
 
+For native cross-machine `send`, address the session as `reviewer@workstation` (or a full session UUID followed by `@workstation`). pi-intercom finds the session on that machine and relays the message through SSH while every broker remains local-only. Herdr is optional. If `workstation` is an enabled saved Herdr machine, its Herdr agent list is checked first and its saved SSH target is used. Otherwise, or if Herdr is not installed, `workstation` is used as an SSH host name (`~/.ssh/config` aliases work). Sessions that Herdr does not list are found by running `<crossMachine.remoteCommand> list --json` (default `pi-intercom list --json`) on the machine. Those SSH connections run in batch mode, so they need key or agent authentication and a known host key; a password or host-key prompt fails instead of waiting. Ordinary local targets never fall back to remote discovery, and disabled Herdr machines and malformed addresses fail closed.
+
 The relay carries structured SSH-asserted origin metadata. Incoming headers render `From worker@laptop · unverified cross-machine` and provide a new-message `send` hint to that address. This identity is not cryptographically verified: anyone with SSH access that can invoke the relay can claim it. Cross-machine `ask`, `replyTo`, attachments, supersede, retry, `noWake`, cwd/project-pane routing, and lifecycle actions are not supported in v1.
 
 ## Pi-subagents integration

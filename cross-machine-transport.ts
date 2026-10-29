@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { discoverRemoteAgent, type RemoteAgent, type SavedMachine } from "./cross-machine-discovery.ts";
+import { DIRECT_SSH_OPTIONS, discoverRemoteAgent, type RemoteAgent, type SavedMachine } from "./cross-machine-discovery.ts";
 import type { CrossMachineEnvelope, CrossMachineOrigin } from "./cross-machine-envelope.ts";
 
 export const DELIVERY_TIMEOUT_MS = 15_000;
@@ -105,6 +105,7 @@ export async function sendCrossMachine(
   const match = await discoverRemoteAgent(target, {
     run,
     herdrBin: herdr,
+    remoteCommand,
     ...(deps.discoveryTimeoutMs === undefined ? {} : { discoveryTimeoutMs: deps.discoveryTimeoutMs }),
   });
   const envelope: CrossMachineEnvelope = {
@@ -113,7 +114,7 @@ export async function sendCrossMachine(
   };
   const delivered = await run(
     "ssh",
-    [match.machine.target, `${remoteCommand} relay --envelope-stdin --json`],
+    [...(match.viaSsh ? DIRECT_SSH_OPTIONS : []), match.machine.target, `${remoteCommand} relay --envelope-stdin --json`],
     `${JSON.stringify(envelope)}\n`,
     deps.deliveryTimeoutMs ?? DELIVERY_TIMEOUT_MS,
   );
