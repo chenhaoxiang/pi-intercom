@@ -842,7 +842,7 @@ class IntercomBroker {
             const replyEdgeKey = message.replyTo ? scopedMessageKey(fromSession.scopeId, message.replyTo) : undefined;
             const reverseEdge = Array.from(this.askEdges.entries()).find(([edgeMessageKey, edge]) => edgeMessageKey !== replyEdgeKey && edge.scopeId === fromSession.scopeId && edge.from === target.key && edge.to === currentKey);
             if (reverseEdge) {
-              this.writeDeliveryFailure(socket, message.id, "Mutual ask refused: target session is already waiting for a reply from this session.", "E_MUTUAL_ASK");
+              this.writeDeliveryFailure(socket, message.id, "Mutual ask refused: target session is already waiting for a reply from this session. Answer its pending ask with reply; a question can go in that reply.", "E_MUTUAL_ASK");
               break;
             }
             this.writePendingAskRecord(message, fromSession, target.info, brokerReceivedAt);
