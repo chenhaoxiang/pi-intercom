@@ -76,6 +76,8 @@ A healthy legacy shared broker is deliberately reused; new source on disk does n
 
 ## What the fork maintains
 
+A sender can mark a `send` as information only with `noWake: true` (`--no-wake` in the CLI). An idle recipient then gets the message in its transcript without starting a turn, and the model reads it with the recipient's next turn. Busy recipients get it the same way as any other message. Asks and replies, including a `send` that answers a pending ask, always wake the recipient, and `inboundTrigger: "replies"` or `"never"` still applies as configured.
+
 In fullscreen mode, a plain left-click anywhere on an intercom message expands or collapses just that message; click again to undo. Only the display changes, not the message content, what the model sees, or session history. Dragging to select text, clicking links, wheel scrolling, and double- or triple-click word and line selection keep working and do not toggle the message, though the first click of a rapid double-click can. Regular mode leaves mouse input to the terminal.
 
 Ctrl+O still expands or collapses every message and clears per-message choices. Those choices are not saved: reloading, resuming, or forking a session, or anything that rebuilds the whole transcript, returns each message to the Ctrl+O state.
@@ -144,7 +146,9 @@ The default blocking `ask` timeout is 10 minutes. Override it with a positive va
 export PI_INTERCOM_ASK_TIMEOUT_MS=600000
 ```
 
-For one bounded request, pass `timeoutMs` to `ask`. A timeout returns `state: "UNKNOWN"`, keeps execution/completion unknown, and never replays the original ask. An explicit `escalateTo` target may receive one new `wake:true` status notification for takeover review; it is not an automatic business-action retry:
+For one bounded request, pass `timeoutMs` to `ask`. A timeout returns `state: "UNKNOWN"`, keeps execution/completion unknown, and never replays the original ask. An explicit `escalateTo` target may receive one new `wake:true` status notification for takeover review; it is not an automatic business-action retry.
+
+The CLI supports `--no-wake` for local information-only sends. Asks, replies and sends that answer a pending ask always wake the recipient.
 
 ```ts
 intercom({
@@ -165,6 +169,8 @@ pi-intercom status --message-id <message-id> --json
 Other runtime controls include `PI_INTERCOM_SCOPE_ID`, `PI_INTERCOM_STABLE_ID`, `PI_INTERCOM_LIVENESS_INTERVAL_MS`, `PI_INTERCOM_LIVENESS_TIMEOUT_MS`, and the bounded client send timeout `PI_INTERCOM_SEND_TIMEOUT_MS` (maximum 10 seconds).
 
 Invalid configuration fails closed for inbound broker auto-triggering by using `inboundTrigger: "never"` until the file is corrected.
+
+The relay carries structured SSH-asserted origin metadata. Incoming headers render `From worker@laptop · unverified cross-machine` and provide a new-message `send` hint to that address. This identity is not cryptographically verified: anyone with SSH access that can invoke the relay can claim it. Cross-machine `ask`, `replyTo`, attachments, supersede, retry, `noWake`, cwd/project-pane routing, and lifecycle actions are not supported in v1.
 
 ## Pi-subagents integration
 

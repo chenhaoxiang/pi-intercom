@@ -123,6 +123,8 @@ export interface Message {
   intercomVersion?: string;
   /** Explicitly request a receiver turn for a task handoff, or suppress one for a status notice. */
   wake?: boolean;
+  /** Sender asked that this message not start a turn in an idle receiver. */
+  noWake?: boolean;
   provenance?: MessageProvenance;
   crossMachine?: CrossMachineProvenance;
   content: {

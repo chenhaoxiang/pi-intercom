@@ -204,6 +204,10 @@ export function isMessage(value: unknown): value is Message {
     return false;
   }
 
+  if (value.noWake !== undefined && typeof value.noWake !== "boolean") {
+    return false;
+  }
+
   if (value.provenance !== undefined && !isMessageProvenance(value.provenance)) {
     return false;
   }
@@ -229,6 +233,7 @@ export function messageDeliveryFingerprint(message: Message, targetId: string): 
     expectsReply: message.expectsReply,
     wakeProtocol: message.wakeProtocol,
     wake: message.wake,
+    noWake: message.noWake
     supersedes: message.supersedes,
     retryOf: message.retryOf,
     provenance: message.provenance,

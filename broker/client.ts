@@ -28,6 +28,7 @@ interface SendOptions {
   replyTo?: string;
   expectsReply?: boolean;
   wake?: boolean;
+  noWake?: boolean;
   messageId?: string;
   supersedes?: string;
   retryOf?: string;
@@ -801,6 +802,7 @@ export class IntercomClient extends EventEmitter {
       wakeProtocol: 1,
       ...(this.intercomVersion ? { intercomVersion: this.intercomVersion } : {}),
       ...(options.wake !== undefined ? { wake: options.wake } : {}),
+      ...(options.noWake !== undefined ? { noWake: options.noWake } : {}),
       provenance: options.provenance,
       crossMachine: options.crossMachine,
       content: {

@@ -97,6 +97,7 @@ interface DeliveryRequest {
   wake?: boolean;
   /** Handovers are always new messages and are not sent once the signal aborts. */
   handover?: boolean;
+  noWake?: boolean;
 }
 
 interface IntercomToolResult {
@@ -380,6 +381,7 @@ export function explicitCrossMachineSendRestriction(options: {
   replyTo?: string;
   supersedes?: string;
   retryOf?: string;
+  noWake?: boolean;
 }): string | undefined {
   if (!options.to?.includes("@")) return undefined;
   if (options.cwd || options.openProjectPaneIfMissing) {
@@ -387,6 +389,9 @@ export function explicitCrossMachineSendRestriction(options: {
   }
   if (options.replyTo || options.supersedes || options.retryOf || options.attachments?.length) {
     return "Cross-machine send only supports a new text message; attachments, reply relationships, supersede, and retry are not supported.";
+  }
+  if (options.noWake) {
+    return "Cross-machine send does not support noWake; the receiver always wakes. Send it without noWake.";
   }
   return undefined;
 }
@@ -907,6 +912,7 @@ function formatInboundDeliveryMetadata(message: Message): string {
   if (message.supersedes) parts.push(`supersedes ${message.supersedes}`);
   if (message.retryOf) parts.push(`retry of ${message.retryOf}`);
   if (message.lateReplyTo) parts.push(`late reply to ${message.lateReplyTo}`);
+  if (message.noWake) parts.push("sent without waking you");
   const sentAt = formatMessageTimestamp(message.timestamp);
   if (sentAt) parts.push(`sent ${sentAt}`);
   const brokerDeliveredAt = formatMessageTimestamp(message.brokerDeliveredAt);
@@ -1665,8 +1671,9 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       }
     })();
   }
-  function shouldTriggerInboundMessage(entry: InboundMessageEntry): boolean {
-    if (config.inboundTrigger === "never" || entry.message.wake === false) return false;
+  function shouldTriggerInboundMessage(entry: InboundMessageEntry, forceTrigger = false): boolean {
+    if (forceTrigger) return true;
+    if (config.inboundTrigger === "never" || entry.message.wake === false || entry.message.noWake) return false;
     if (config.inboundTrigger === "always") return true;
     if (config.inboundTrigger === "replies") {
       // Old senders had no explicit wake field and used send for task handoffs.
@@ -2305,11 +2312,11 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     signal: AbortSignal | undefined,
     request: DeliveryRequest,
   ): Promise<IntercomToolResult> {
-    const { to, cwd, openProjectPaneIfMissing, focus, message, attachments, replyTo, supersedes, retryOf } = request;
+    const { to, cwd, openProjectPaneIfMissing, focus, message, attachments, replyTo, supersedes, retryOf, noWake } = request;
     try {
       const crossMachineTarget = Boolean(to?.includes("@"));
       const crossMachineRestriction = explicitCrossMachineSendRestriction({
-        to, cwd, openProjectPaneIfMissing, attachments, replyTo, supersedes, retryOf,
+        to, cwd, openProjectPaneIfMissing, attachments, replyTo, supersedes, retryOf, noWake,
       });
       if (crossMachineRestriction) {
         return {
@@ -2452,6 +2459,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
           supersedes,
           retryOf,
           ...(request.wake !== undefined || request.handover || effectiveReplyTo ? { wake: request.wake ?? true } : {}),
+          ...(noWake && !effectiveReplyTo ? { noWake: true } : {}),
         });
       });
       if (!result.delivered) {
@@ -3190,8 +3198,9 @@ Usage:
   intercom({ action: "list" })                    → List active sessions
   intercom({ action: "list-cwd" })                → List sessions in the current working directory
   intercom({ action: "list-cwd", cwd: "/path" })  → List sessions in a specific directory
-  intercom({ action: "send", to: "name-or-id", message: "..." })  → Record a status notification
+  intercom({ action: "send", to: "name-or-id", message: "..." })  → Send message
   intercom({ action: "send", to: "name-or-id", message: "...", wake: true }) → Request non-blocking task attention
+  intercom({ action: "send", to: "name-or-id", message: "...", noWake: true }) → Information only: an idle receiver reads it on its next turn instead of starting one
   intercom({ action: "send", cwd: "/path", openProjectPaneIfMissing: true, message: "..." }) → Open a visible Herdr project pane when needed, then send
   intercom({ action: "ask", to: "name-or-id", message: "..." })   → Ask and wait for reply
   intercom({ action: "handover", to: "name-or-id", message: "next task" }) → Summarize this session and hand it over; the receiver acts on it
@@ -3264,6 +3273,9 @@ Usage:
       focus: Type.Optional(Type.Boolean({
         description: "For openProjectPaneIfMissing, focus the new Herdr pane. Defaults to true.",
       })),
+      noWake: Type.Optional(Type.Boolean({
+        description: "For 'send' only: true delivers the message without starting a turn in an idle receiver; it reads the message on its next turn. Use for information that needs no action or reply. Ignored when the send is a reply to an ask.",
+      })),
     }),
     constrainedSampling: { type: "json_schema", strict: "prefer" },
 
@@ -3290,7 +3302,7 @@ Usage:
         if (localAdvice) notifyIfLive(ctx, localAdvice, "info");
       }
 
-      const { action, to, message, wake, attachments, replyTo, messageId, timeoutMs, escalateTo, followUp, supersedes, retryOf, cwd, openProjectPaneIfMissing, focus } = minimalParams;
+      const { action, to, message, wake, attachments, replyTo, messageId, timeoutMs, escalateTo, followUp, supersedes, retryOf, cwd, openProjectPaneIfMissing, focus, noWake } = minimalParams;
 
       switch (action) {
         case "list": {
@@ -3415,7 +3427,7 @@ Usage:
             };
           }
           return deliverMessage(connectedClient, ctx, _signal, {
-            to, cwd, openProjectPaneIfMissing, focus, message, wake, attachments, replyTo, supersedes, retryOf,
+            to, cwd, openProjectPaneIfMissing, focus, message, wake, attachments, replyTo, supersedes, retryOf, noWake,
           });
         }
 
