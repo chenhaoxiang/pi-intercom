@@ -102,6 +102,92 @@ interface DeliveryRequest {
 interface IntercomToolResult {
   content: Array<{ type: "text"; text: string }>;
   details: Record<string, unknown>;
+  isError?: boolean;
+}
+
+// Keep the existing API, but reject action/field mistakes before connecting or sending.
+const INTERCOM_ACTION_FIELDS: Record<string, readonly string[]> = {
+  list: [],
+  "list-cwd": ["cwd"],
+  pending: [],
+  status: ["messageId"],
+  cancel: ["messageId"],
+  send: ["to", "cwd", "message", "wake", "attachments", "replyTo", "supersedes", "retryOf", "openProjectPaneIfMissing", "focus"],
+  ask: ["to", "cwd", "message", "attachments", "replyTo", "supersedes", "retryOf", "timeoutMs", "escalateTo", "followUp", "openProjectPaneIfMissing", "focus"],
+  handover: ["to", "cwd", "message", "wake", "openProjectPaneIfMissing", "focus"],
+  reply: ["to", "message", "attachments", "replyTo"],
+};
+const INTERCOM_ID_FIELDS = ["replyTo", "messageId", "supersedes", "retryOf", "escalateTo"] as const;
+
+function parameterError(action: string, field: string, reason: string): IntercomToolResult {
+  const corrections = field === "replyTo" ? [
+    { intent: "ordinary_send", instruction: "For an ordinary notification, use send and omit replyTo. Do not remove a reply binding unless this is really a new notification." },
+    { intent: "reply_to_ask", instruction: "For an ask response, use reply and copy the exact replyTo from its inbound hint; use pending to inspect asks. A session ID is not an ask message ID." },
+  ] : [{ intent: "correct_parameters", instruction:
+    field === "message" ? "Provide a non-empty message; keep the original intended recipient and action." :
+    field === "to" ? "Provide a real session target in to, or use cwd to identify the intended peer. Use list to discover targets." :
+    field === "cwd" ? "Provide a real cwd when opening a project pane; otherwise omit cwd and openProjectPaneIfMissing." :
+    field === "messageId" && ["status", "cancel"].includes(action) ? "Copy a real messageId from a previous tool result. status may omit messageId for connection status; cancel requires a real messageId." :
+    "Omit this unsupported field, or supply its real value only for an action that supports it. Never invent placeholder values.",
+  }];
+  // The model must see the correction, not only the renderer's private details.
+  // Do not echo the business body or offer an automatically executable reroute.
+  const body = {
+    ok: false, code: "E_INTERCOM_INVALID_PARAMETERS", action, field, reason,
+    state: "NOT_SENT", delivered: false, retryPolicy: "CORRECT_ARGUMENTS_ONCE", corrections,
+  };
+  return {
+    isError: true,
+    content: [{ type: "text", text: JSON.stringify(body, null, 2) }],
+    details: { ...body, error: true, outcomeKnown: true, execution: "unknown", completion: "unknown" },
+  };
+}
+
+function preflightIntercomParameters(params: Record<string, unknown>): IntercomToolResult | undefined {
+  const action = typeof params.action === "string" ? params.action : "";
+  if (!Object.hasOwn(INTERCOM_ACTION_FIELDS, action)) {
+    return parameterError(action, "action", "Choose an action from list, list-cwd, send, ask, handover, reply, pending, status, cancel.");
+  }
+  for (const field of INTERCOM_ID_FIELDS) {
+    const value = params[field];
+    // Preserve the existing ask self-healing contract for blank escalateTo;
+    // non-blank placeholders remain invalid rather than becoming owner targets.
+    if (field === "escalateTo" && (typeof value !== "string" || !value.trim())) continue;
+    if (value != null && (typeof value !== "string" || !value.trim()
+      || /^(?:unused|:omit|omit|undefined|null)$/i.test(value.trim()))) {
+      return parameterError(action, field, "Use a real message ID or omit the optional field. Placeholder strings do not mean omission.");
+    }
+  }
+  for (const field of Object.keys(params)) {
+    if (field !== "action" && params[field] != null && !INTERCOM_ACTION_FIELDS[action]!.includes(field)) {
+      return parameterError(action, field, field + " is not supported for action " + action + "; omit it.");
+    }
+  }
+  const hasText = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;
+  if (params.cwd != null && !hasText(params.cwd)) {
+    return parameterError(action, "cwd", "cwd must be a non-empty directory, or omitted.");
+  }
+  if (["send", "ask", "handover"].includes(action) && !hasText(params.to) && !hasText(params.cwd)) {
+    return parameterError(action, "to", "Missing 'to' or 'cwd' parameter; provide a real recipient.");
+  }
+  if (["send", "ask", "reply"].includes(action) && !hasText(params.message)) {
+    return parameterError(action, "message", "Missing 'message' parameter; provide non-empty text.");
+  }
+  if (action === "cancel" && !hasText(params.messageId)) {
+    return parameterError(action, "messageId", "Missing 'messageId' parameter; cancel needs a real prior message ID.");
+  }
+  if (params.openProjectPaneIfMissing === true && !hasText(params.cwd)) {
+    return parameterError(action, "cwd", "openProjectPaneIfMissing requires a target cwd.");
+  }
+  return undefined;
+}
+
+function replyTargetParameterError(action: string, error: unknown): IntercomToolResult | undefined {
+  const reason = getErrorMessage(error);
+  if (/No pending ask with message ID|Multiple pending asks|Pending ask .* is not from|expired or no longer pending/.test(reason)) {
+    return parameterError(action, "replyTo", reason);
+  }
+  return undefined;
 }
 
 /** `rawTo` is the string the caller addressed; pass "" to disable the name-prefix fallback. */
@@ -2244,7 +2330,16 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       // An exact pending message ID already identifies its sender, even if
       // several live sessions share the same display name. Never guess when
       // there is no such message binding; retain ordinary name ambiguity checks.
-      const boundReply = replyTo ? await resolveReplyTarget(connectedClient, { to, replyTo }) : undefined;
+      let boundReply: IntercomContext | undefined;
+      if (replyTo) {
+        try {
+          boundReply = await resolveReplyTarget(connectedClient, { to, replyTo });
+        } catch (error) {
+          const invalid = replyTargetParameterError("send", error);
+          if (invalid) return invalid;
+          throw error;
+        }
+      }
       const resolvedTo = boundReply?.from.id ?? to;
       const target: DeliveryTarget = cwd
         ? await resolveCwdDeliveryTarget(connectedClient, { to: resolvedTo, cwd, openProjectPaneIfMissing, focus, signal })
@@ -3012,7 +3107,10 @@ Choose the action by the work shape:
 - Long-running reviews, delegation, implementation, or status notifications: use 'send' with 'wake: true' when the peer must act. Do not use blocking 'ask' for work that may take minutes.
 - Short decisions that need an immediate response: use 'ask'.
 - Replies to an inbound ask: use 'reply' with the exact 'replyTo' shown in the hint.
-- Omit optional fields entirely when they are not needed. Never send empty strings, nulls, placeholder timestamps, or an empty 'followUp' object. 'escalateTo' and 'followUp' are only for an explicitly bounded timeout/escalation plan.
+- Construct the smallest call for the action. Ordinary send needs only a target, message and optional wake; do not add replyTo or messageId. status/list/pending need no target or message.
+- Prefer omitting unused optional fields. If the actual provider schema requires a nullable optional field, JSON null is restored to omission by Pi. Strings such as 'unused', ':omit', 'undefined' and 'null' are real values, never omissions. Do not invent IDs or timestamps.
+- 'escalateTo' and 'followUp' are ask-only controls for an explicitly bounded timeout/escalation plan, not defaults.
+- Parameter errors return JSON with code, field, corrections, state: 'NOT_SENT' and retryPolicy: 'CORRECT_ARGUMENTS_ONCE'. Follow the correction once without changing business intent. The tool never silently reroutes or resends.
 - If a call reports parameter normalization, continue with the delivered primary action. If a call is cancelled after a message id exists, inspect 'status' and do not resend the original action automatically.
 - If 'reply' reports fallback 'ordinary_send', the stale reply edge was replaced by one ordinary response; do not retry the response.
 
@@ -3099,8 +3197,12 @@ Usage:
         description: "For openProjectPaneIfMissing, focus the new Herdr pane. Defaults to true.",
       })),
     }),
+    constrainedSampling: { type: "json_schema", strict: "prefer" },
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const parameterErrorResult = preflightIntercomParameters(params as unknown as Record<string, unknown>);
+      if (parameterErrorResult) return parameterErrorResult;
+
       let connectedClient: IntercomClient;
       try {
         connectedClient = await ensureConnected("tool");
@@ -3466,6 +3568,7 @@ Usage:
             };
           }
 
+          let sendAttempted = false;
           try {
             const target = await resolveReplyTarget(connectedClient, { to, replyTo });
             if (target.from.id === connectedClient.sessionId) {
@@ -3475,6 +3578,7 @@ Usage:
               };
             }
             const pendingReplyTo = target.message.expectsReply ? target.message.id : undefined;
+            sendAttempted = true;
             const result = await connectedClient.send(target.from.id, {
               text: message,
               attachments,
@@ -3546,6 +3650,10 @@ Usage:
               details: { attention: "wake_requested", ...deliveryDetails(result), ...(pendingReplyTo ? { replyTo: pendingReplyTo } : {}) },
             };
           } catch (error) {
+            if (!sendAttempted) {
+              const invalid = replyTargetParameterError("reply", error);
+              if (invalid) return invalid;
+            }
             return {
               content: [{ type: "text", text: `Failed to reply: ${getErrorMessage(error)}` }],
               details: { error: true },

@@ -10,7 +10,7 @@
 
 ## 发布版本与分支约定
 
-当前源代码/发布候选版本为 **0.18.1-fork.3**，基于社区 **0.18.1**；上一版 **0.18.1-fork.2** 保留用于回退。安装前核对同版本不可变 Release。fork 版本统一使用 `<社区版本>-fork.<修订号>`，本地修订不冒充社区新版本。
+当前源代码/发布候选版本为 **0.18.1-fork.4**，基于社区 **0.18.1**；上一版 **0.18.1-fork.3** 保留用于回退。安装前核对同版本不可变 Release。fork 版本统一使用 `<社区版本>-fork.<修订号>`，本地修订不冒充社区新版本。
 
 - `main`：我们的维护、整合与发布主线，保留 fork 修复。
 - `upstream-main`：仅镜像社区 `main`，不加入 fork 提交，也不作为安装来源。
@@ -19,7 +19,7 @@
 固定版本安装：
 
 ```bash
-pi install git:github.com/chenhaoxiang/pi-intercom@v0.18.1-fork.3
+pi install git:github.com/chenhaoxiang/pi-intercom@v0.18.1-fork.4
 ```
 
 [GitHub Releases](https://github.com/chenhaoxiang/pi-intercom/releases) 提供可安装的包、来源清单和 `SHA256SUMS` 校验文件；这不是向上游作者的 npm 命名空间发布。发布及制品安装流程见[维护说明](docs/releasing.md)。
@@ -57,6 +57,8 @@ intercom({ action: "status" })
 ```
 
 `send` 是发送后立即返回；`ask` 要求目标当前已连接，并等待对方回复，回复会作为工具结果返回。目标断开时，`ask` 会立即失败，不会留下一个无法结束的阻塞请求。
+
+Intercom 会在连接和发送前拒绝错误的参数组合。如果返回 JSON `code: "E_INTERCOM_INVALID_PARAMETERS"` 且 `state: "NOT_SENT"`，应按 `corrections` 只纠正一次，不能改变原业务意图。未使用的字段应省略；`replyTo` 必须是入站 ask 的精确消息 ID，`"unused"`、`":omit"` 等字符串不表示省略。
 
 需要交接会话时，可以在选择器中按 `h`，或调用：
 

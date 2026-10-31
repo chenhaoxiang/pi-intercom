@@ -10,7 +10,7 @@ Direct 1:1 messaging between Pi sessions on the same machine. This repository is
 
 ## Releases and branch policy
 
-The current source/release candidate is **0.18.1-fork.3**, based on community **0.18.1**; the previous **0.18.1-fork.2** remains available for rollback. Verify the matching immutable Release before installation. Fork releases use `<community-version>-fork.<revision>`; the fork revision increases without pretending to be a new upstream release.
+The current source/release candidate is **0.18.1-fork.4**, based on community **0.18.1**; the previous **0.18.1-fork.3** remains available for rollback. Verify the matching immutable Release before installation. Fork releases use `<community-version>-fork.<revision>`; the fork revision increases without pretending to be a new upstream release.
 
 - `main`: our maintained integration and release branch, including fork fixes.
 - `upstream-main`: an exact mirror of the community's `main`, with no fork commits. Never install from this branch.
@@ -19,7 +19,7 @@ The current source/release candidate is **0.18.1-fork.3**, based on community **
 Install a reproducible release:
 
 ```bash
-pi install git:github.com/chenhaoxiang/pi-intercom@v0.18.1-fork.3
+pi install git:github.com/chenhaoxiang/pi-intercom@v0.18.1-fork.4
 ```
 
 [GitHub Releases](https://github.com/chenhaoxiang/pi-intercom/releases) include the installable package tarball, a provenance manifest, and `SHA256SUMS`. These GitHub releases are not npm publications under the upstream author's namespace. See [release maintenance](docs/releasing.md) for asset installation and future releases.
@@ -57,6 +57,8 @@ intercom({ action: "status" })
 ```
 
 `send` is fire-and-forget. `ask` requires a currently connected target and waits for a reply, returning that reply as the tool result. A disconnected target fails immediately instead of leaving a blocking request queued.
+
+Intercom rejects malformed parameter combinations before connecting or sending. If it returns JSON `code: "E_INTERCOM_INVALID_PARAMETERS"` with `state: "NOT_SENT"`, apply the listed correction once without changing the intended action. Omit unused fields; `replyTo` must be an exact inbound ask message ID, and strings such as `"unused"` or `":omit"` are not omission.
 
 For a handoff, use the overlay's `h` key or:
 
