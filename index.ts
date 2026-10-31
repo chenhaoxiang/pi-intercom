@@ -119,17 +119,19 @@ const INTERCOM_ACTION_FIELDS: Record<string, readonly string[]> = {
 };
 const INTERCOM_ID_FIELDS = ["replyTo", "messageId", "supersedes", "retryOf", "escalateTo"] as const;
 
-function parameterError(action: string, field: string, reason: string): IntercomToolResult {
-  const corrections = field === "replyTo" ? [
-    { intent: "ordinary_send", instruction: "For an ordinary notification, use send and omit replyTo. Do not remove a reply binding unless this is really a new notification." },
-    { intent: "reply_to_ask", instruction: "For an ask response, use reply and copy the exact replyTo from its inbound hint; use pending to inspect asks. A session ID is not an ask message ID." },
-  ] : [{ intent: "correct_parameters", instruction:
-    field === "message" ? "Provide a non-empty message; keep the original intended recipient and action." :
-    field === "to" ? "Provide a real session target in to, or use cwd to identify the intended peer. Use list to discover targets." :
-    field === "cwd" ? "Provide a real cwd when opening a project pane; otherwise omit cwd and openProjectPaneIfMissing." :
-    field === "messageId" && ["status", "cancel"].includes(action) ? "Copy a real messageId from a previous tool result. status may omit messageId for connection status; cancel requires a real messageId." :
-    "Omit this unsupported field, or supply its real value only for an action that supports it. Never invent placeholder values.",
-  }];
+function parameterError(action: string, field: string, reason: string, unsupportedField = false): IntercomToolResult {
+  const corrections = unsupportedField
+    ? [{ intent: "minimal_call", instruction: `Remove unsupported field ${field} and retry the same ${action} action; do not add a replacement target or message unless that action requires one.` }]
+    : field === "replyTo" ? [
+      { intent: "ordinary_send", instruction: "For an ordinary notification, use send and omit replyTo. Do not remove a reply binding unless this is really a new notification." },
+      { intent: "reply_to_ask", instruction: "For an ask response, use reply and copy the exact replyTo from its inbound hint; use pending to inspect asks. A session ID is not an ask message ID." },
+    ] : [{ intent: "correct_parameters", instruction:
+      field === "message" ? "Provide a non-empty message; keep the original intended recipient and action." :
+      field === "to" ? "Provide a real session target in to, or use cwd to identify the intended peer. Use list to discover targets." :
+      field === "cwd" ? "Provide a real cwd when opening a project pane; otherwise omit cwd and openProjectPaneIfMissing." :
+      field === "messageId" && ["status", "cancel"].includes(action) ? "Copy a real messageId from a previous tool result. status may omit messageId for connection status; cancel requires a real messageId." :
+      "Omit this unsupported field, or supply its real value only for an action that supports it. Never invent placeholder values.",
+    }];
   // The model must see the correction, not only the renderer's private details.
   // Do not echo the business body or offer an automatically executable reroute.
   const body = {
@@ -160,7 +162,7 @@ function preflightIntercomParameters(params: Record<string, unknown>): IntercomT
   }
   for (const field of Object.keys(params)) {
     if (field !== "action" && params[field] != null && !INTERCOM_ACTION_FIELDS[action]!.includes(field)) {
-      return parameterError(action, field, field + " is not supported for action " + action + "; omit it.");
+      return parameterError(action, field, field + " is not supported for action " + action + "; omit it.", true);
     }
   }
   const hasText = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;

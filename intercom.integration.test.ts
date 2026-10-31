@@ -3028,6 +3028,8 @@ test("parameter preflight returns actionable JSON before connecting or allocatin
     { params: { action: "send", to: "peer", message: "notice", supersedes: "undefined" }, field: "supersedes" },
     { params: { action: "send", to: "peer", message: "notice", retryOf: "unused" }, field: "retryOf" },
     { params: { action: "send", to: "peer", message: "notice", messageId: "real-but-inapplicable" }, field: "messageId" },
+    { params: { action: "status", to: "worker" }, field: "to" },
+    { params: { action: "pending", message: "status update" }, field: "message" },
     { params: { action: "send", message: "notice" }, field: "to" },
     { params: { action: "send", to: "peer" }, field: "message" },
     { params: { action: "cancel" }, field: "messageId" },
@@ -3044,6 +3046,11 @@ test("parameter preflight returns actionable JSON before connecting or allocatin
     assert.equal(body.retryPolicy, "CORRECT_ARGUMENTS_ONCE");
     assert.equal(body.delivered, false);
     assert.ok(body.corrections.length > 0);
+    if ((params.action === "status" && field === "to") || (params.action === "pending" && field === "message")) {
+      assert.equal(body.corrections[0].intent, "minimal_call");
+      assert.match(body.corrections[0].instruction, /Remove unsupported field/);
+      assert.match(body.corrections[0].instruction, new RegExp(`same ${params.action} action`));
+    }
     assert.equal(result.details?.messageId, undefined);
     assert.equal(body.messageId, undefined);
   }
