@@ -3058,6 +3058,36 @@ test("parameter preflight returns actionable JSON before connecting or allocatin
   assert.deepEqual(harness.sentMessages, [], "preflight must not inject any wake or advisory");
 });
 
+test("direct execution strips optional nulls and empty attachments without changing action intent", { concurrency: false }, async () => {
+  const { planner, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("direct-minimal-send", { sessionId: "direct-minimal-send" });
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const tool = harness.tools.find((candidate) => candidate.name === "intercom")!;
+    const received = once(planner, "message") as Promise<[SessionInfo, Message]>;
+    const result = await tool.execute("direct-minimal-send", {
+      action: "send",
+      to: "planner",
+      message: "one ordinary notice",
+      wake: false,
+      replyTo: null,
+      messageId: null,
+      followUp: null,
+      attachments: [],
+    } as never, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(result.details?.delivered, true);
+    const [, message] = await received;
+    assert.equal(message.replyTo, undefined);
+    assert.deepEqual(message.content.attachments, undefined);
+    assert.equal(harness.entries.filter((entry) => entry.type === "intercom_sent").length, 1);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("strict optional nulls preserve minimal send semantics and never turn strings into omissions", { concurrency: false }, async () => {
   const { planner, orchestrator, cleanup } = await setupClients();
   const { default: piIntercomExtension } = await import("./index.ts");
@@ -7007,6 +7037,11 @@ test("runtime metadata reaches roster and messages without changing authored tex
     const status = await tool.execute("runtime-status", { action: "status" }, new AbortController().signal, undefined, harness.ctx);
     assert.match(status.content[0].text, new RegExp(`Loaded runtime: Intercom ${LOADED_INTERCOM_VERSION}`));
     assert.match(status.content[0].text, new RegExp(`Broker runtime: Intercom ${LOADED_INTERCOM_VERSION}`));
+    assert.match(status.content[0].text, /Maintenance: coreIdle=/);
+    const maintenance = status.details?.maintenance as Record<string, unknown>;
+    assert.equal(maintenance.loadedVersion, LOADED_INTERCOM_VERSION);
+    assert.equal(maintenance.children, "unknown");
+    assert.equal(maintenance.reload, "manual_after_child_and_task_checkpoint");
     const roster = await tool.execute("runtime-list", { action: "list" }, new AbortController().signal, undefined, harness.ctx);
     assert.match(roster.content[0].text, /Intercom unknown/);
   } finally { await harness.emitLifecycle("session_shutdown"); await fixture.cleanup(); }
@@ -7034,7 +7069,8 @@ test("newer peer advice adds no extra wake and is bounded per version", { concur
     const { default: register } = await import("./index.ts");
     const fixture = await setupClients();
     const sender = new IntercomClient();
-    const harness = createExtensionHarness("runtime-advice-worker", { hasUI: true });
+    const notices: string[] = [];
+    const harness = createExtensionHarness("runtime-advice-worker", { hasUI: true, ui: { notify: (message: string) => notices.push(message) } });
     try {
       register(harness.pi as never);
       await harness.emitLifecycle("session_start");
@@ -7042,10 +7078,9 @@ test("newer peer advice adds no extra wake and is bounded per version", { concur
       await sender.connect({ name: "newer-runtime", cwd: repoDir, model: "fixture", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(), intercomVersion: "99.0.0-fork.1" });
       for (let i = 0; i < 2; i++) await sender.send(self.id, { text: `Status ${i}`, wake: false });
       await waitForCondition(() => harness.sentMessages.filter(item => item.message.customType === "intercom_message").length === 2, "versioned status injection");
-      const advice = harness.sentMessages.filter(item => item.message.customType === "intercom-runtime-advisory");
+      const advice = notices.filter(message => message.includes("safe idle"));
       assert.equal(advice.length, 1);
-      assert.equal(advice[0].options?.triggerTurn, false);
-      assert.match(String(advice[0].message.content), /safe idle/);
+      assert.equal(harness.sentMessages.filter(item => item.message.customType === "intercom-runtime-advisory").length, 0);
       assert.deepEqual(harness.userMessages, []);
       assert.ok(harness.sentMessages.every(item => item.options?.triggerTurn === false));
     } finally { await sender.disconnect().catch(() => undefined); await harness.emitLifecycle("session_shutdown"); await fixture.cleanup(); }

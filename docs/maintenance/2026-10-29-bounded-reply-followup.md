@@ -31,4 +31,10 @@ The existing single `intercom` tool requests provider-preferred strict JSON Sche
 
 A reply ID that cannot be resolved is also rejected with correction JSON before a send attempt; it is never silently removed to turn the response into a notification. Existing valid exact-sender reply fallback and all post-allocation `UNKNOWN` outcomes remain unchanged. Provider-free tests exercise the SDK Responses adapter, host argument normalization, the public tool and synthetic broker, but do not prove every remote provider accepts the schema.
 
+## Follow-up runtime/context hardening (local candidate)
+
+The Intercom tool now performs an action-specific preflight before connecting, then constructs a minimal action-specific argument object for direct tool/codemode execution. Nullable optional fields and empty attachment arrays are omitted; non-null unsupported fields, placeholder IDs and missing required routing/message fields remain fail-closed with `NOT_SENT` correction JSON. The requested action, target, message, wake bit and real routing IDs are not rewritten.
+
+Runtime-version upgrade advice now uses the UI-only maintenance notification path rather than appending a model-context message. No request-local projection of existing messages is performed: ordinary notices, attachments, replies, raw history, cached prefixes and opaque checkpoint replay remain unchanged. `intercom status` now reports selected/loaded runtime and local idle/queue/held-message/pending-ask facts; it does not certify child settlement or authorize an automatic reload.
+
 This source change does not install packages, reload active sessions, or prove live business delivery. Provider-free tests and isolated synthetic sessions are the source validation boundary; installation, runtime loading and live acceptance are separate evidence.
