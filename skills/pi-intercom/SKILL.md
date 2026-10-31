@@ -33,9 +33,10 @@ Use the smallest valid call for the requested work:
 
 - Use `send` for reviews, implementation, investigation, or any task that may take more than a short decision turn. Add `wake: true` when the peer must actively start work. Use `ask` only when an immediate answer is needed to continue this turn.
 - Use `reply` for an inbound ask and copy the exact `replyTo` shown in the message hint. Do not turn a reply into a new `ask`.
-- Omit optional fields when they are not needed. Never send `escalateTo: ""`, `followUp: {}`, nulls, placeholder timestamps, or empty IDs. `escalateTo` and `followUp` are advanced timeout/reminder controls, not defaults for ordinary messages.
+- Construct the smallest action-specific call: ordinary `send` needs a real target and message (plus `wake: true` only when active work must start); `reply` needs the exact inbound ask `replyTo`; `status`/`cancel` use a real prior `messageId`.
+- Omit optional fields when they are not needed. Pi may normalize JSON `null` for an optional field to omission, but strings such as `"unused"`, `":omit"`, `"undefined"` and `"null"` are real values, never omission. Never invent IDs, placeholder timestamps, or an empty `followUp`.
 - A `followUp` is valid only when `afterMs` is between 1000 and 86400000 and `expiresAt` is a real future ISO timestamp later than the reminder time. Do not invent one for a normal delegation.
-- If the tool returns `parameterWarnings`, the primary action was normalized and should not be sent again. If it returns `E_ASK_CANCELLED` or `state: "UNKNOWN"` with a `messageId`, call `status` first and never blindly resend the original message.
+- If the tool returns JSON `code: "E_INTERCOM_INVALID_PARAMETERS"` with `state: "NOT_SENT"`, follow its `corrections` once without changing business intent. If it returns `parameterWarnings`, the primary action was normalized and must not be sent again. If it returns `E_ASK_CANCELLED` or `state: "UNKNOWN"` with a `messageId`, call `status` first and never blindly resend the original message.
 - If `reply` reports `fallback: "ordinary_send"`, the original ask edge was no longer pending (for example, the asker cancelled its waiter after delivery). The response was already sent once; do not retry it.
 - If a call fails before a message id is created with a parameter error, self-correct once by removing unsupported/empty optional fields and retry with the minimal payload. Do not ask the user to repair a tool call that can be corrected locally.
 
@@ -77,6 +78,24 @@ intercom({
   message: "Task-3 complete. Added exponential backoff (100ms → 1600ms, max 5 retries). Ready for task-4?"
 })
 ```
+
+### Parameter correction contract
+
+Invalid arguments are rejected before the Intercom connection or broker send is attempted. The result includes JSON fields `code`, `field`, `reason`, `state: "NOT_SENT"`, `retryPolicy: "CORRECT_ARGUMENTS_ONCE"`, and `corrections`. Read the correction and make one minimal retry; do not silently turn a reply into a new notification.
+
+For example, an ordinary notification is:
+
+```typescript
+intercom({ action: "send", to: "worker", message: "Status update", wake: true })
+```
+
+A reply is different:
+
+```typescript
+intercom({ action: "reply", replyTo: "exact-ask-message-id", message: "The answer" })
+```
+
+`replyTo` is an ask message ID, not a session ID. If no exact ID is available, use `pending` or the inbound hint; never fill it with `unused`, `:omit`, `null`, or a guessed value.
 
 ### Pattern 2: Quick Status Check
 

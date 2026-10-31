@@ -4,6 +4,17 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.18.1-fork.4] - 2026-10-31
+
+### Added
+- Add provider-preferred strict JSON Schema sampling for the Intercom tool while retaining nullable optional-field compatibility.
+- Add pre-send action/parameter validation with machine-readable `E_INTERCOM_INVALID_PARAMETERS` corrections and `NOT_SENT`/`CORRECT_ARGUMENTS_ONCE` retry semantics.
+- Add regression coverage proving placeholder IDs and unsupported fields cannot allocate or send a message, while valid nullable optional arguments remain minimal.
+
+### Fixed
+- Explain how to repair `unused`, `:omit` and other placeholder routing values instead of treating them as pending ask IDs.
+- Keep unresolved reply targets fail-closed before any broker send and preserve existing `UNKNOWN`/no-replay behavior after message allocation.
+
 ## [0.18.1-fork.3] - 2026-10-29
 
 ### Added

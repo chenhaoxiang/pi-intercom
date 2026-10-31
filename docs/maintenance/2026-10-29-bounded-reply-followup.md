@@ -25,4 +25,10 @@ The tool-facing contract is intentionally self-healing for optional controls: bl
 
 If a receiver answers an ask after the sender has cancelled its waiter, the broker may reject the old `replyTo` edge with `E_REPLY_TARGET`. The reply tool then sends exactly one ordinary response to the exact original sender, marks `fallback: "ordinary_send"` and `replyTargetState: "UNKNOWN"`, and never claims that the stale reply edge or original business action completed. Callers must not retry a response that reports this fallback.
 
+## Parameter correction contract (fork.4)
+
+The existing single `intercom` tool requests provider-preferred strict JSON Schema sampling. On supported hosts, optional JSON null values are restored to omission before execution; placeholder strings such as `unused`, `:omit`, `undefined` and `null` are not omission. The tool validates action-specific fields, required target/message values and routing IDs before connecting. Parameter failures return model-visible JSON with `E_INTERCOM_INVALID_PARAMETERS`, `field`, `reason`, `corrections`, `state: "NOT_SENT"` and `retryPolicy: "CORRECT_ARGUMENTS_ONCE"`. The correction is advice, not an automatic resend or permission to change the intended recipient/action. The result does not echo the business message body.
+
+A reply ID that cannot be resolved is also rejected with correction JSON before a send attempt; it is never silently removed to turn the response into a notification. Existing valid exact-sender reply fallback and all post-allocation `UNKNOWN` outcomes remain unchanged. Provider-free tests exercise the SDK Responses adapter, host argument normalization, the public tool and synthetic broker, but do not prove every remote provider accepts the schema.
+
 This source change does not install packages, reload active sessions, or prove live business delivery. Provider-free tests and isolated synthetic sessions are the source validation boundary; installation, runtime loading and live acceptance are separate evidence.

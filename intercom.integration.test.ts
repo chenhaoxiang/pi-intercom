@@ -9,6 +9,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Component, TuiMouseEvent } from "@earendil-works/pi-tui";
 import type { MessageRenderer } from "@earendil-works/pi-coding-agent";
+import { validateToolArguments } from "@earendil-works/pi-ai";
 import { InlineMessageComponent } from "./ui/inline-message.ts";
 import { ReplyTracker } from "./reply-tracker.ts";
 import { runCli } from "./cli.ts";
@@ -161,6 +162,7 @@ async function withChildOrchestratorEnv<T>(metadata: {
 interface CapturedToolResult {
   content: Array<{ type: string; text: string }>;
   details?: Record<string, unknown>;
+  isError?: boolean;
 }
 
 interface RenderToolResult {
@@ -180,6 +182,7 @@ interface RenderTheme {
 interface CapturedTool {
   name: string;
   parameters?: unknown;
+  constrainedSampling?: unknown;
   execute: (toolCallId: string, params: Record<string, unknown>, signal: AbortSignal, onUpdate: unknown, ctx: unknown) => Promise<CapturedToolResult>;
   renderCall?: (args: Record<string, unknown>, theme: RenderTheme, context: Record<string, unknown>) => RenderedComponent;
   renderResult?: (result: RenderToolResult, options: { expanded?: boolean; isPartial?: boolean }, theme: RenderTheme, context: Record<string, unknown>) => RenderedComponent;
@@ -3007,6 +3010,125 @@ test("ask timeout marks UNKNOWN and sends one new bounded escalation notice", { 
       await cleanup();
     }
   });
+});
+
+test("parameter preflight returns actionable JSON before connecting or allocating a message", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("parameter-preflight");
+  piIntercomExtension(harness.pi as never);
+  // Deliberately do not start the runtime: validation must precede ensureConnected.
+  const tool = harness.tools.find((candidate) => candidate.name === "intercom")!;
+  const invalid: Array<{ params: Record<string, unknown>; field: string }> = [
+    { params: { action: "send", to: "peer", message: "notice", replyTo: "unused" }, field: "replyTo" },
+    { params: { action: "send", to: "peer", message: "notice", replyTo: ":omit" }, field: "replyTo" },
+    { params: { action: "reply", message: "answer", replyTo: "null" }, field: "replyTo" },
+    { params: { action: "cancel", messageId: "unused" }, field: "messageId" },
+    { params: { action: "status", messageId: ":omit" }, field: "messageId" },
+    { params: { action: "ask", to: "peer", message: "question", escalateTo: "unused" }, field: "escalateTo" },
+    { params: { action: "send", to: "peer", message: "notice", supersedes: "undefined" }, field: "supersedes" },
+    { params: { action: "send", to: "peer", message: "notice", retryOf: "unused" }, field: "retryOf" },
+    { params: { action: "send", to: "peer", message: "notice", messageId: "real-but-inapplicable" }, field: "messageId" },
+    { params: { action: "status", to: "worker" }, field: "to" },
+    { params: { action: "pending", message: "status update" }, field: "message" },
+    { params: { action: "send", message: "notice" }, field: "to" },
+    { params: { action: "send", to: "peer" }, field: "message" },
+    { params: { action: "cancel" }, field: "messageId" },
+    { params: { action: "send", cwd: " ", message: "notice" }, field: "cwd" },
+    { params: { action: "send", to: "peer", message: "notice", openProjectPaneIfMissing: true }, field: "cwd" },
+  ];
+  for (const { params, field } of invalid) {
+    const result = await tool.execute("invalid-parameters", params, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(result.details?.state, "NOT_SENT", JSON.stringify(params));
+    assert.equal(result.isError, true);
+    const body = JSON.parse(result.content[0]!.text);
+    assert.equal(body.code, "E_INTERCOM_INVALID_PARAMETERS");
+    assert.equal(body.field, field);
+    assert.equal(body.retryPolicy, "CORRECT_ARGUMENTS_ONCE");
+    assert.equal(body.delivered, false);
+    assert.ok(body.corrections.length > 0);
+    if ((params.action === "status" && field === "to") || (params.action === "pending" && field === "message")) {
+      assert.equal(body.corrections[0].intent, "minimal_call");
+      assert.match(body.corrections[0].instruction, /Remove unsupported field/);
+      assert.match(body.corrections[0].instruction, new RegExp(`same ${params.action} action`));
+    }
+    assert.equal(result.details?.messageId, undefined);
+    assert.equal(body.messageId, undefined);
+  }
+  assert.deepEqual(harness.entries, [], "preflight must not author or allocate a message");
+  assert.deepEqual(harness.sentMessages, [], "preflight must not inject any wake or advisory");
+});
+
+test("strict optional nulls preserve minimal send semantics and never turn strings into omissions", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("nullable-send", { sessionId: "nullable-send" });
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const tool = harness.tools.find((candidate) => candidate.name === "intercom")!;
+    assert.deepEqual(tool.constrainedSampling, { type: "json_schema", strict: "prefer" });
+    // Exercise the pinned SDK's actual Responses adapter without a provider request.
+    const { convertResponsesTools } = await import(new URL("./api/openai-responses-shared.js", import.meta.resolve("@earendil-works/pi-ai")).href);
+    const [wireTool] = convertResponsesTools([tool], { strict: null, supportsStrictMode: true });
+    assert.equal(wireTool.strict, true);
+    assert.ok(wireTool.parameters.properties.replyTo.anyOf.some((variant: { type: string }) => variant.type === "null"));
+    assert.ok(wireTool.parameters.properties.messageId.anyOf.some((variant: { type: string }) => variant.type === "null"));
+    const primary = { action: "send", to: "orchestrator", message: "One notice only.", wake: false };
+    const args = validateToolArguments(tool as never, {
+      id: "nullable-args", name: "intercom", arguments: { ...primary, replyTo: null, messageId: null, followUp: null },
+    });
+    assert.deepEqual(args, primary, "the host restores optional nulls to absence before execution");
+    const received = once(orchestrator, "message") as Promise<[SessionInfo, Message]>;
+    const result = await tool.execute("nullable-send", args, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(result.details?.delivered, true);
+    assert.equal((await received)[1].replyTo, undefined);
+    const invalidArgs = validateToolArguments(tool as never, {
+      id: "placeholder-args", name: "intercom", arguments: { ...primary, replyTo: "unused" },
+    });
+    assert.equal(invalidArgs.replyTo, "unused", "string shape validation cannot establish routing intent");
+    const rejected = await tool.execute("placeholder-send", invalidArgs, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(rejected.details?.state, "NOT_SENT");
+    assert.equal(harness.entries.filter((entry) => entry.type === "intercom_sent").length, 1);
+    await waitForSessionByName(planner, "nullable-send");
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
+test("unresolved reply IDs return correction JSON only before any send attempt", { concurrency: false }, async () => {
+  const { cleanup } = await setupClients();
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("unresolved-reply", { sessionId: "unresolved-reply" });
+  const originalSend = IntercomClient.prototype.send;
+  let sendAttempts = 0;
+  try {
+    piIntercomExtension(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    IntercomClient.prototype.send = function (...args: Parameters<typeof originalSend>) {
+      sendAttempts += 1;
+      return originalSend.apply(this, args);
+    };
+    const tool = harness.tools.find((candidate) => candidate.name === "intercom")!;
+    for (const action of ["send", "reply"]) {
+      const result = await tool.execute("unresolved-reply", {
+        action, to: "orchestrator", message: "Do not convert this into a new notification.", replyTo: "nonexistent-ask-id",
+      }, new AbortController().signal, undefined, harness.ctx);
+      assert.equal(result.isError, true);
+      assert.equal(result.details?.state, "NOT_SENT");
+      const body = JSON.parse(result.content[0]!.text);
+      assert.equal(body.field, "replyTo");
+      assert.match(body.reason, /No pending ask with message ID/);
+      assert.ok(body.corrections.some((correction: { instruction: string }) => correction.instruction.includes("pending")));
+      assert.equal(body.messageId, undefined);
+    }
+    assert.equal(sendAttempts, 0, "unbound reply IDs must never be retried as an ordinary send");
+    assert.deepEqual(harness.entries, []);
+  } finally {
+    IntercomClient.prototype.send = originalSend;
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
 });
 
 test("ask self-heals empty optional escalation and follow-up fields without dropping the primary message", { concurrency: false }, async () => {
