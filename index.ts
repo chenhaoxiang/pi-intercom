@@ -184,6 +184,27 @@ function preflightIntercomParameters(params: Record<string, unknown>): IntercomT
   return undefined;
 }
 
+/**
+ * Construct the smallest action-specific argument object after preflight.
+ *
+ * Pi's strict JSON-schema path already turns optional nulls into omission for model calls,
+ * but direct tools/codemode can still call execute() with null-valued optional fields. Keep
+ * the boundary deterministic: unsupported non-null fields were rejected by preflight, while
+ * nulls and empty attachment lists are omitted without changing the requested action, target,
+ * message, wake bit, or real routing IDs.
+ */
+function normalizeIntercomParameters(params: Record<string, unknown>): Record<string, unknown> {
+  const action = typeof params.action === "string" ? params.action : "";
+  const normalized: Record<string, unknown> = { action };
+  for (const field of INTERCOM_ACTION_FIELDS[action] ?? []) {
+    const value = params[field];
+    if (value === undefined || value === null) continue;
+    if (field === "attachments" && Array.isArray(value) && value.length === 0) continue;
+    normalized[field] = value;
+  }
+  return normalized;
+}
+
 function replyTargetParameterError(action: string, error: unknown): IntercomToolResult | undefined {
   const reason = getErrorMessage(error);
   if (/No pending ask with message ID|Multiple pending asks|Pending ask .* is not from|expired or no longer pending/.test(reason)) {
@@ -1727,8 +1748,10 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     const receivedMessage = { ...message, receiverReceivedAt };
     peerVersions.observe(from, receivedMessage.intercomVersion ?? from.intercomVersion);
     observeFollowupReply(from, receivedMessage);
-    const advice = runtimeAdvisory(receivedMessage.intercomVersion ?? from.intercomVersion, "peer");
-    if (advice) pi.sendMessage({ customType: "intercom-runtime-advisory", content: advice, display: true }, { triggerTurn: false });
+    if (liveContext.hasUI) {
+      const advice = runtimeAdvisory(receivedMessage.intercomVersion ?? from.intercomVersion, "peer");
+      if (advice) notifyIfLive(liveContext, advice, "info", messageGeneration);
+    }
     emitMessageReceipt(receivedMessage.id, "receiver_received");
     if (replyWaiter) {
       const senderTarget = from.name || from.id;
@@ -3202,8 +3225,10 @@ Usage:
     constrainedSampling: { type: "json_schema", strict: "prefer" },
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const parameterErrorResult = preflightIntercomParameters(params as unknown as Record<string, unknown>);
+      const rawParams = params as unknown as Record<string, unknown>;
+      const parameterErrorResult = preflightIntercomParameters(rawParams);
       if (parameterErrorResult) return parameterErrorResult;
+      const minimalParams = normalizeIntercomParameters(rawParams) as typeof params;
 
       let connectedClient: IntercomClient;
       try {
@@ -3217,10 +3242,12 @@ Usage:
 
       syncPresenceIdentity(ctx.sessionManager.getSessionId());
 
-      const localAdvice = runtimeAdvisory(selectedLocalRuntimeVersion(), "selection");
-      if (localAdvice) pi.sendMessage({ customType: "intercom-runtime-advisory", content: localAdvice, display: true }, { triggerTurn: false });
+      if (ctx.hasUI) {
+        const localAdvice = runtimeAdvisory(selectedLocalRuntimeVersion(), "selection");
+        if (localAdvice) notifyIfLive(ctx, localAdvice, "info");
+      }
 
-      const { action, to, message, wake, attachments, replyTo, messageId, timeoutMs, escalateTo, followUp, supersedes, retryOf, cwd, openProjectPaneIfMissing, focus } = params;
+      const { action, to, message, wake, attachments, replyTo, messageId, timeoutMs, escalateTo, followUp, supersedes, retryOf, cwd, openProjectPaneIfMissing, focus } = minimalParams;
 
       switch (action) {
         case "list": {
@@ -3716,12 +3743,29 @@ Usage:
               : "";
             const mySession = sessions.find((session) => session.id === mySessionId);
             const shortId = (mySessionId ?? "unknown").slice(0, 8);
+            const selectedVersion = selectedLocalRuntimeVersion();
+            const pendingAsks = replyTracker.listPending().length;
+            const maintenance = {
+              selectedVersion: selectedVersion ?? "unknown",
+              loadedVersion: LOADED_INTERCOM_VERSION ?? "unknown",
+              coreIdle: ctx.isIdle(),
+              activeTools: activeTools.size,
+              pendingAsks,
+              waitingForReply: replyWaiter !== null,
+              heldMessages: heldInboundMessages.length,
+              queuedMessages: ctx.hasPendingMessages?.() ?? null,
+              // Intercom cannot certify child/run settlement. Never infer safe reload from
+              // a quiet roster or age alone, and do not control other sessions here.
+              children: "unknown",
+              reload: "manual_after_child_and_task_checkpoint",
+            };
+            const maintenanceText = `\nSelected installation: ${runtimeLabel(selectedVersion)}\nMaintenance: coreIdle=${maintenance.coreIdle}; activeTools=${maintenance.activeTools}; pendingAsks=${pendingAsks}; waitingForReply=${maintenance.waitingForReply}; heldMessages=${maintenance.heldMessages}; queuedMessages=${maintenance.queuedMessages ?? "unknown"}; children=unknown. Reload only after task/child checkpoint; no automatic restart or history cleanup.`;
             return {
               content: [{
                 type: "text",
-                text: `**Intercom status:**\nConnected: Yes\nLoaded runtime: ${runtimeLabel(LOADED_INTERCOM_VERSION)}\nBroker runtime: ${runtimeLabel(connectedClient.brokerVersion)} (separate process; reload does not restart it)\nSession ID: ${mySessionId}\nSession name: ${mySession?.name ?? "(unnamed)"} (short id: ${shortId})${pool ? `\nPool: ${pool}` : ""}\nActive sessions: ${sessions.length}${observation}\nExecution/completion: unknown (transport receipts are not task outcomes)`,
+                text: `**Intercom status:**\nConnected: Yes\nLoaded runtime: ${runtimeLabel(LOADED_INTERCOM_VERSION)}\nBroker runtime: ${runtimeLabel(connectedClient.brokerVersion)} (separate process; reload does not restart it)\nSession ID: ${mySessionId}\nSession name: ${mySession?.name ?? "(unnamed)"} (short id: ${shortId})${pool ? `\nPool: ${pool}` : ""}\nActive sessions: ${sessions.length}${observation}${maintenanceText}\nExecution/completion: unknown (transport receipts are not task outcomes)`,
               }],
-              details: queriedStatus ? { receipt: queriedStatus.receiverReceipt?.status ?? localReceipt?.status ?? "unknown", ...messageStatusDetails(queriedStatus) } : {},
+              details: { maintenance, ...(queriedStatus ? { receipt: queriedStatus.receiverReceipt?.status ?? localReceipt?.status ?? "unknown", ...messageStatusDetails(queriedStatus) } : {}) },
             };
           } catch (error) {
             return {

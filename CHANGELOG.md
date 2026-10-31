@@ -4,6 +4,14 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+### Added
+- Add an execution-boundary normalization step so direct tool/codemode calls omit nullable optional fields and empty attachment arrays after action-aware preflight, without changing the requested action or routing IDs.
+- Keep runtime-version upgrade advice in the UI-only maintenance path instead of appending it as model context, while retaining raw history for audit/replay.
+- Extend `intercom status` with loaded/selected runtime, idle/queue/held-message/pending-ask maintenance facts and an explicit manual safe-idle reload boundary.
+
+### Fixed
+- Prevent malformed optional values from reaching the Intercom execution switch after validation and keep display-only runtime advice out of later provider requests.
+
 ## [0.18.1-fork.4] - 2026-10-31
 
 ### Added
