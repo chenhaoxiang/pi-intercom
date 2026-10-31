@@ -4,6 +4,8 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.18.1-fork.5] - 2026-10-31
+
 ### Added
 - Add an execution-boundary normalization step so direct tool/codemode calls omit nullable optional fields and empty attachment arrays after action-aware preflight, without changing the requested action or routing IDs.
 - Keep runtime-version upgrade advice in the UI-only maintenance path instead of appending it as model context, while retaining raw history for audit/replay.
