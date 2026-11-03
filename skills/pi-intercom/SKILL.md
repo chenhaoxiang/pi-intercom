@@ -31,7 +31,7 @@ intercom({ action: "reply", replyTo: "exact-inbound-ask-id", message: "Retain it
 ## Keep parameters minimal and recover honestly
 
 - Pass only fields supported by the action. Omit unused optional fields; JSON `null` may normalize to omission, but strings `"unused"`, `":omit"`, `"undefined"` and `"null"` are real values. Never invent IDs or timestamps.
-- `E_INTERCOM_INVALID_PARAMETERS` with `state:"NOT_SENT"` means follow `corrections` once, preserving the business intent. A result with `parameterWarnings` already delivered the normalized primary action: do not resend it.
+- `E_INTERCOM_INVALID_PARAMETERS` with `state:"NOT_SENT"` means follow `corrections` once, preserving the business intent. `parameterWarnings` means optional parameters were normalized, not that delivery succeeded. Do not resend merely to remove a warning; use `delivered`, `delivery` and `state` to determine the outcome.
 - After a message ID exists, timeout, cancellation or missing transport evidence remains `UNKNOWN`. Use `status` with that exact `messageId`; never blindly replay the original message.
 - `ask.escalateTo` and `followUp` are opt-in bounded status notifications, not default delegation fields. A follow-up needs finite `afterMs` (1000–86400000) and an expiry later than its reminder. Do not fabricate these controls for normal calls.
 - Delivery, receiver receipt, injection, wake, idle presence and an exact reply do not prove execution or business completion.
