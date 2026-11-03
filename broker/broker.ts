@@ -1250,15 +1250,13 @@ class IntercomBroker {
   private completeSocketDelivery(senderSocket: net.Socket, fromKey: string, scopeId: string | undefined, target: ConnectedSession, message: Message, fingerprint: string): void {
     const key = this.deliveryRecordKey(fromKey, message.id);
     const demoted = message.lateReplyTo ? "late_reply" : undefined;
-    this.recordDelivery(fromKey, message.id, fingerprint, target.acknowledgesReceipts ? "unknown" : "socket_delivered");
+    this.recordDelivery(fromKey, message.id, fingerprint, target.acknowledgesReceipts ? "unknown" : "socket_delivered", undefined, undefined, target.acknowledgesReceipts === true, target.key, message.expectsReply === true);
     if (demoted) this.deliveryRecords.get(key)!.demoted = demoted;
     if (!target.acknowledgesReceipts) {
       this.releaseReplyEdge(message.replyTo, scopeId);
-      this.recordDelivery(fromKey, message.id, fingerprint, "socket_delivered", undefined, undefined, false, target.key, message.expectsReply === true);
       this.writeDeliverySuccess(senderSocket, message.id, "socket_delivered", demoted);
       return;
     }
-    this.recordDelivery(fromKey, message.id, fingerprint, "unknown", undefined, undefined, true, target.key, message.expectsReply === true);
     const timer = setTimeout(() => {
       this.failPendingReceipt(key, `Receiver did not confirm receipt within ${RECEIPT_TIMEOUT_MS}ms`, "E_RECEIPT_TIMEOUT");
     }, RECEIPT_TIMEOUT_MS);
