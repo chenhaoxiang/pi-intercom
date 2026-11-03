@@ -233,7 +233,7 @@ export function messageDeliveryFingerprint(message: Message, targetId: string): 
     expectsReply: message.expectsReply,
     wakeProtocol: message.wakeProtocol,
     wake: message.wake,
-    noWake: message.noWake
+    noWake: message.noWake,
     supersedes: message.supersedes,
     retryOf: message.retryOf,
     provenance: message.provenance,

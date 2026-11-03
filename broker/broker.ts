@@ -825,7 +825,6 @@ class IntercomBroker {
             this.writeDeliveryFailure(socket, message.id, "Reply target does not match a pending ask", "E_REPLY_TARGET");
             break;
           }
-          }
           if (message.supersedes) {
             const supersededRoute = this.messageReceiptRoutes.get(scopedMessageKey(fromSession.scopeId, message.supersedes));
             if (!supersededRoute || supersededRoute.from !== currentKey || supersededRoute.to !== target.key) {
@@ -908,7 +907,6 @@ class IntercomBroker {
           if (message.replyTo && !replyEdge) {
             this.writeDeliveryFailure(socket, message.id, "Reply target does not match a pending ask", "E_REPLY_TARGET");
             break;
-          }
           }
           if (message.supersedes) {
             this.writeDeliveryFailure(socket, message.id, "Supersede target is not connected", "E_SUPERSEDE_TARGET");

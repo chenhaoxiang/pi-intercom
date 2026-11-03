@@ -113,7 +113,7 @@ const INTERCOM_ACTION_FIELDS: Record<string, readonly string[]> = {
   pending: [],
   status: ["messageId"],
   cancel: ["messageId"],
-  send: ["to", "cwd", "message", "wake", "attachments", "replyTo", "supersedes", "retryOf", "openProjectPaneIfMissing", "focus"],
+  send: ["to", "cwd", "message", "wake", "noWake", "attachments", "replyTo", "supersedes", "retryOf", "openProjectPaneIfMissing", "focus"],
   ask: ["to", "cwd", "message", "attachments", "replyTo", "supersedes", "retryOf", "timeoutMs", "escalateTo", "followUp", "openProjectPaneIfMissing", "focus"],
   handover: ["to", "cwd", "message", "wake", "openProjectPaneIfMissing", "focus"],
   reply: ["to", "message", "attachments", "replyTo"],

@@ -4,6 +4,16 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.18.1-fork.6] - 2026-11-03
+
+### Added
+- Synchronize community main through `4b387e8001167eb949e6697d089b6cd6117de761`, retaining the fork's bounded delivery, explicit wake, runtime-version and parameter-correction contracts.
+- Include community no-wake sends, late-reply demotion, stale broker recovery, extension-channel unregister, and Herdr-free SSH discovery.
+
+### Fixed
+- Preserve scoped receipt routing and durable ask replay behavior while integrating the community late-reply path.
+
+
 ### Added
 - Sending to `name@machine` no longer requires Herdr. pi-intercom connects to the machine over SSH by that host name (including `~/.ssh/config` aliases), finds the session in that machine's intercom roster, and delivers the message there. This also reaches Pi sessions that run outside a Herdr pane on a machine saved in Herdr. The SSH connection must work without a password or host-key prompt. Thanks to [@mblarsen](https://github.com/mblarsen) for issue #194.
 - Extension channels have `unregister()`. A session can leave a namespace it registered, which frees one of its 32 extension slots and, if it owned the namespace, hands ownership to the next owner-eligible member. Thanks to [@wayne930242](https://github.com/wayne930242) for #184.

@@ -3387,11 +3387,10 @@ test("reply falls back to one ordinary response when the delivered ask edge was 
     }, new AbortController().signal, undefined, harness.ctx);
 
     assert.equal(result.details?.error, undefined);
-    assert.equal(result.details?.fallback, "ordinary_send");
-    assert.equal(result.details?.replyTargetState, "UNKNOWN");
-    await waitForCondition(() => workerReplies.some((message) => message.content.text === "The delivered request is acknowledged."), "ordinary fallback response");
-    const fallback = workerReplies.find((message) => message.content.text === "The delivered request is acknowledged.")!;
-    assert.equal(fallback.replyTo, undefined, "fallback must not claim a reply edge that no longer exists");
+    assert.equal(result.details?.demoted, "late_reply");
+    await waitForCondition(() => workerReplies.some((message) => message.content.text === "The delivered request is acknowledged."), "late reply response");
+    const lateReply = workerReplies.find((message) => message.content.text === "The delivered request is acknowledged.")!;
+    assert.equal(lateReply.replyTo, undefined, "late reply must be delivered as a regular message");
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
@@ -3483,7 +3482,7 @@ test("a noWake send reaches an idle session without starting a turn", { concurre
 
         assert.equal((await planner.send(worker.id, { text: "Paused the job, no reply needed", noWake: true })).delivered, true);
         await waitForCondition(() => harness.sentMessages.length === 1, "no-wake message");
-        assert.deepEqual(harness.sentMessages[0]?.options, { deliverAs: "steer" }, piVersion);
+        assert.deepEqual(harness.sentMessages[0]?.options, { triggerTurn: false }, piVersion);
         assert.match(harness.sentMessages[0]?.message.content ?? "", /sent without waking you/);
         assert.deepEqual(harness.userMessages, [], piVersion);
 
