@@ -10,7 +10,7 @@ Direct 1:1 messaging between Pi sessions on the same machine. This repository is
 
 ## Releases and branch policy
 
-The current source/release candidate is **0.18.1-fork.5**, based on community **0.18.1**; the previous **0.18.1-fork.4** remains available for rollback. Verify the matching immutable Release before installation. Fork releases use `<community-version>-fork.<revision>`; the fork revision increases without pretending to be a new upstream release.
+The current source/release candidate is **0.18.1-fork.6**, based on community **0.18.1**; the previous **0.18.1-fork.5** remains available for rollback. Verify the matching immutable Release before installation. Fork releases use `<community-version>-fork.<revision>`; the fork revision increases without pretending to be a new upstream release.
 
 - `main`: our maintained integration and release branch, including fork fixes.
 - `upstream-main`: an exact mirror of the community's `main`, with no fork commits. Never install from this branch.
@@ -19,7 +19,7 @@ The current source/release candidate is **0.18.1-fork.5**, based on community **
 Install a reproducible release:
 
 ```bash
-pi install git:github.com/chenhaoxiang/pi-intercom@v0.18.1-fork.5
+pi install git:github.com/chenhaoxiang/pi-intercom@v0.18.1-fork.6
 ```
 
 [GitHub Releases](https://github.com/chenhaoxiang/pi-intercom/releases) include the installable package tarball, a provenance manifest, and `SHA256SUMS`. These GitHub releases are not npm publications under the upstream author's namespace. See [release maintenance](docs/releasing.md) for asset installation and future releases.
@@ -75,6 +75,8 @@ At an existing tool invocation or inbound message, a newer selected/peer-reporte
 A healthy legacy shared broker is deliberately reused; new source on disk does not activate its mailbox-lifetime fix. A coordinated idle restart remains a separate operation, not something a peer message may force.
 
 ## What the fork maintains
+
+A sender can mark a `send` as information only with `noWake: true` (`--no-wake` in the CLI). An idle recipient then gets the message in its transcript without starting a turn, and the model reads it with the recipient's next turn. Busy recipients get it the same way as any other message. Asks and replies, including a `send` that answers a pending ask, always wake the recipient, and `inboundTrigger: "replies"` or `"never"` still applies as configured.
 
 In fullscreen mode, a plain left-click anywhere on an intercom message expands or collapses just that message; click again to undo. Only the display changes, not the message content, what the model sees, or session history. Dragging to select text, clicking links, wheel scrolling, and double- or triple-click word and line selection keep working and do not toggle the message, though the first click of a rapid double-click can. Regular mode leaves mouse input to the terminal.
 
@@ -144,7 +146,9 @@ The default blocking `ask` timeout is 10 minutes. Override it with a positive va
 export PI_INTERCOM_ASK_TIMEOUT_MS=600000
 ```
 
-For one bounded request, pass `timeoutMs` to `ask`. A timeout returns `state: "UNKNOWN"`, keeps execution/completion unknown, and never replays the original ask. An explicit `escalateTo` target may receive one new `wake:true` status notification for takeover review; it is not an automatic business-action retry:
+For one bounded request, pass `timeoutMs` to `ask`. A timeout returns `state: "UNKNOWN"`, keeps execution/completion unknown, and never replays the original ask. An explicit `escalateTo` target may receive one new `wake:true` status notification for takeover review; it is not an automatic business-action retry.
+
+The CLI supports `--no-wake` for local information-only sends. Asks, replies and sends that answer a pending ask always wake the recipient.
 
 ```ts
 intercom({
@@ -165,6 +169,10 @@ pi-intercom status --message-id <message-id> --json
 Other runtime controls include `PI_INTERCOM_SCOPE_ID`, `PI_INTERCOM_STABLE_ID`, `PI_INTERCOM_LIVENESS_INTERVAL_MS`, `PI_INTERCOM_LIVENESS_TIMEOUT_MS`, and the bounded client send timeout `PI_INTERCOM_SEND_TIMEOUT_MS` (maximum 10 seconds).
 
 Invalid configuration fails closed for inbound broker auto-triggering by using `inboundTrigger: "never"` until the file is corrected.
+
+For native cross-machine `send`, address the session as `reviewer@workstation` (or a full session UUID followed by `@workstation`). pi-intercom finds the session on that machine and relays the message through SSH while every broker remains local-only. Herdr is optional. If `workstation` is an enabled saved Herdr machine, its Herdr agent list is checked first and its saved SSH target is used. Otherwise, or if Herdr is not installed, `workstation` is used as an SSH host name (`~/.ssh/config` aliases work). Sessions that Herdr does not list are found by running `<crossMachine.remoteCommand> list --json` (default `pi-intercom list --json`) on the machine. Those SSH connections run in batch mode, so they need key or agent authentication and a known host key; a password or host-key prompt fails instead of waiting. Ordinary local targets never fall back to remote discovery, and disabled Herdr machines and malformed addresses fail closed.
+
+The relay carries structured SSH-asserted origin metadata. Incoming headers render `From worker@laptop · unverified cross-machine` and provide a new-message `send` hint to that address. This identity is not cryptographically verified: anyone with SSH access that can invoke the relay can claim it. Cross-machine `ask`, `replyTo`, attachments, supersede, retry, `noWake`, cwd/project-pane routing, and lifecycle actions are not supported in v1.
 
 ## Pi-subagents integration
 

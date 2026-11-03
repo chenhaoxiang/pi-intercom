@@ -88,6 +88,11 @@ export interface IntercomExtensionChannel {
   publish(payload: unknown, options?: { audience?: "owner" | "capable"; ownerOnly?: boolean }): void;
   commitState(payload: unknown, expectedRevision?: number): void;
   listSessions(): Promise<SessionInfo[]>;
+  /**
+   * Leaves this namespace: frees its per-session slot and hands ownership to the next owner-eligible
+   * member. Afterwards `publish` and `commitState` throw and `onEvent` stops; repeated calls are no-ops.
+   */
+  unregister(): void;
 }
 
 export interface IntercomExtensionRegistration {

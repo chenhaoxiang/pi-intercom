@@ -97,6 +97,7 @@ interface DeliveryRequest {
   wake?: boolean;
   /** Handovers are always new messages and are not sent once the signal aborts. */
   handover?: boolean;
+  noWake?: boolean;
 }
 
 interface IntercomToolResult {
@@ -112,7 +113,7 @@ const INTERCOM_ACTION_FIELDS: Record<string, readonly string[]> = {
   pending: [],
   status: ["messageId"],
   cancel: ["messageId"],
-  send: ["to", "cwd", "message", "wake", "attachments", "replyTo", "supersedes", "retryOf", "openProjectPaneIfMissing", "focus"],
+  send: ["to", "cwd", "message", "wake", "noWake", "attachments", "replyTo", "supersedes", "retryOf", "openProjectPaneIfMissing", "focus"],
   ask: ["to", "cwd", "message", "attachments", "replyTo", "supersedes", "retryOf", "timeoutMs", "escalateTo", "followUp", "openProjectPaneIfMissing", "focus"],
   handover: ["to", "cwd", "message", "wake", "openProjectPaneIfMissing", "focus"],
   reply: ["to", "message", "attachments", "replyTo"],
@@ -372,21 +373,18 @@ function cancelledBeforeSendResult(warnings: readonly string[]): IntercomToolRes
   };
 }
 
-export function explicitCrossMachineSendRestriction(options: {
-  to?: string;
-  cwd?: string;
-  openProjectPaneIfMissing?: boolean;
-  attachments?: readonly unknown[];
-  replyTo?: string;
-  supersedes?: string;
-  retryOf?: string;
-}): string | undefined {
+export function explicitCrossMachineSendRestriction(
+  options: Pick<DeliveryRequest, "to" | "cwd" | "openProjectPaneIfMissing" | "replyTo" | "supersedes" | "retryOf" | "noWake"> & { attachments?: readonly unknown[] },
+): string | undefined {
   if (!options.to?.includes("@")) return undefined;
   if (options.cwd || options.openProjectPaneIfMissing) {
     return "Cross-machine send does not support cwd or opening project panes.";
   }
   if (options.replyTo || options.supersedes || options.retryOf || options.attachments?.length) {
     return "Cross-machine send only supports a new text message; attachments, reply relationships, supersede, and retry are not supported.";
+  }
+  if (options.noWake) {
+    return "Cross-machine send does not support noWake; the receiver always wakes. Send it without noWake.";
   }
   return undefined;
 }
@@ -403,6 +401,17 @@ function queuedText(target: string, what = "message"): string {
   return `Session "${target}" is not connected. The ${what} is waiting in the broker mailbox until that session reconnects.`;
 }
 
+// The broker words "no open ask" ("a pending ask") differently from "an open ask between other sessions" ("the pending ask").
+function isClosedAskReply(result: SendResult): boolean {
+  return result.code === "E_REPLY_TARGET" && result.reason === "Reply target does not match a pending ask";
+}
+
+function closedAskText(target: string): string {
+  return `Reply to "${target}" was not delivered: the broker can no longer match it to an open ask, for example because the asker disconnected or the broker restarted. To deliver the content, send it as a new message without replyTo: intercom({ action: "send", to: "${target}", message: "..." }).`;
+}
+
+const LATE_REPLY_NOTE = "The ask was no longer open, so the reply was delivered as a regular message.";
+
 function deliveryDetails(result: SendResult): Record<string, unknown> {
   return {
     messageId: result.id,
@@ -415,6 +424,7 @@ function deliveryDetails(result: SendResult): Record<string, unknown> {
     outcomeKnown: result.outcomeKnown,
     ...(result.code ? { code: result.code } : {}),
     ...(result.reason ? { reason: result.reason } : {}),
+    ...(result.demoted ? { demoted: result.demoted } : {}),
   };
 }
 
@@ -894,6 +904,8 @@ function formatInboundDeliveryMetadata(message: Message): string {
   if (typeof message.senderSequence === "number") parts.push(`seq ${message.senderSequence}`);
   if (message.supersedes) parts.push(`supersedes ${message.supersedes}`);
   if (message.retryOf) parts.push(`retry of ${message.retryOf}`);
+  if (message.lateReplyTo) parts.push(`late reply to ${message.lateReplyTo}`);
+  if (message.noWake) parts.push("sent without waking you");
   const sentAt = formatMessageTimestamp(message.timestamp);
   if (sentAt) parts.push(`sent ${sentAt}`);
   const brokerDeliveredAt = formatMessageTimestamp(message.brokerDeliveredAt);
@@ -1244,10 +1256,15 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     }
   }
   function createExtensionChannel(namespace: string): IntercomExtensionChannel {
-    return {
+    // Stale handles (after unregister or re-registration) must not act on the namespace.
+    const liveExtension = () => {
+      const extension = localExtensions.get(namespace);
+      return extension?.channel === channel ? extension : undefined;
+    };
+    const channel: IntercomExtensionChannel = {
       namespace,
       snapshot() {
-        const extension = localExtensions.get(namespace);
+        const extension = liveExtension();
         return {
           connected: Boolean(client?.isConnected()),
           supported: Boolean(client?.supportsFeature(EXTENSION_BUS_FEATURE)),
@@ -1256,11 +1273,12 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         };
       },
       publish(payload, options = {}) {
+        const extension = liveExtension();
+        if (!extension) throw new Error(`Intercom extension channel is unregistered: ${namespace}`);
         const activeClient = client;
         if (!activeClient?.isConnected()) throw new Error("Intercom is not connected");
-        const extension = localExtensions.get(namespace);
         const ownerOnly = options.ownerOnly ?? false;
-        const ownerEpoch = ownerOnly ? extension?.owner?.epoch : undefined;
+        const ownerEpoch = ownerOnly ? extension.owner?.epoch : undefined;
         if (ownerOnly && !ownerEpoch) throw new Error(`No owner is available for ${namespace}`);
         activeClient.sendExtensionMessage({
           type: "extension_publish",
@@ -1271,10 +1289,11 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         });
       },
       commitState(payload, expectedRevision) {
+        const extension = liveExtension();
+        if (!extension) throw new Error(`Intercom extension channel is unregistered: ${namespace}`);
         const activeClient = client;
         if (!activeClient?.isConnected()) throw new Error("Intercom is not connected");
-        const extension = localExtensions.get(namespace);
-        const ownerEpoch = extension?.owner?.epoch;
+        const ownerEpoch = extension.owner?.epoch;
         if (!ownerEpoch || extension.owner?.sessionId !== activeClient.sessionId) {
           throw new Error(`Current session is not the owner of ${namespace}`);
         }
@@ -1291,7 +1310,18 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         if (!activeClient?.isConnected()) throw new Error("Intercom is not connected");
         return activeClient.listSessions();
       },
+      unregister() {
+        if (!liveExtension()) return;
+        localExtensions.delete(namespace);
+        const activeClient = client;
+        // Offline or on an older broker there is nothing to withdraw: the
+        // capability list is rebuilt from localExtensions on the next register.
+        if (activeClient?.isConnected() && activeClient.supportsFeature(EXTENSION_BUS_FEATURE)) {
+          activeClient.updateExtensionCapabilities(currentExtensionCapabilities());
+        }
+      },
     };
+    return channel;
   }
   function currentExtensionCapabilities() {
     return [...localExtensions.values()].map(({ registration }) => ({
@@ -1321,11 +1351,14 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       emitLocalExtensionEvent(registration.namespace, { type: "connection", connected: true, supported });
     }
   }
+  // Whether the last register frame listed any namespace: an unregister() during the handshake must still reach the broker.
+  let registrationAdvertisedExtensions = false;
   function buildRegistration(): SessionRegistration {
     const liveContext = getLiveContext();
     if (!liveContext || !currentSessionId || sessionStartedAt === null) {
       throw new Error("Intercom runtime not initialized");
     }
+    registrationAdvertisedExtensions = localExtensions.size > 0;
 
     const identity = buildPresenceIdentity(pi, currentIntercomSessionId ?? currentSessionId);
     const tmuxPane = currentTmuxPane();
@@ -1629,8 +1662,9 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       }
     })();
   }
-  function shouldTriggerInboundMessage(entry: InboundMessageEntry): boolean {
-    if (config.inboundTrigger === "never" || entry.message.wake === false) return false;
+  function shouldTriggerInboundMessage(entry: InboundMessageEntry, forceTrigger = false): boolean {
+    if (forceTrigger) return true;
+    if (config.inboundTrigger === "never" || entry.message.wake === false || entry.message.noWake) return false;
     if (config.inboundTrigger === "always") return true;
     if (config.inboundTrigger === "replies") {
       // Old senders had no explicit wake field and used send for task handoffs.
@@ -1791,7 +1825,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       switch (message.type) {
         case "registered": {
           const supported = message.features?.includes(EXTENSION_BUS_FEATURE) ?? false;
-          if (supported && localExtensions.size > 0) {
+          if (supported && (localExtensions.size > 0 || registrationAdvertisedExtensions)) {
             nextClient.updateExtensionCapabilities(currentExtensionCapabilities());
           }
           for (const namespace of localExtensions.keys()) {
@@ -2247,7 +2281,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       return { id: existing.session.id, label: options.to || existing.session.name || existing.session.id };
     }
     if (!options.openProjectPaneIfMissing) {
-      throw new Error(`${existing.reason ?? `No intercom session is connected in ${targetCwd}.`} Pass openProjectPaneIfMissing: true to open a Herdr project pane and start Pi there.`);
+      throw new Error(`${existing.reason ?? `No intercom session is connected in ${targetCwd}.`} If the user wants a long-lived peer there in its own Herdr pane, pass openProjectPaneIfMissing: true; otherwise tell the user no session is running there.`);
     }
 
     const beforeSessionIds = new Set(sessions.map((session) => session.id));
@@ -2269,11 +2303,11 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     signal: AbortSignal | undefined,
     request: DeliveryRequest,
   ): Promise<IntercomToolResult> {
-    const { to, cwd, openProjectPaneIfMissing, focus, message, attachments, replyTo, supersedes, retryOf } = request;
+    const { to, cwd, openProjectPaneIfMissing, focus, message, attachments, replyTo, supersedes, retryOf, noWake } = request;
     try {
       const crossMachineTarget = Boolean(to?.includes("@"));
       const crossMachineRestriction = explicitCrossMachineSendRestriction({
-        to, cwd, openProjectPaneIfMissing, attachments, replyTo, supersedes, retryOf,
+        to, cwd, openProjectPaneIfMissing, attachments, replyTo, supersedes, retryOf, noWake,
       });
       if (crossMachineRestriction) {
         return {
@@ -2416,9 +2450,17 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
           supersedes,
           retryOf,
           ...(request.wake !== undefined || request.handover || effectiveReplyTo ? { wake: request.wake ?? true } : {}),
+          ...(noWake && !effectiveReplyTo ? { noWake: true } : {}),
         });
       });
       if (!result.delivered) {
+        if (effectiveReplyTo && isClosedAskReply(result)) {
+          dismissIncomingAsk(effectiveReplyTo);
+          return {
+            content: [{ type: "text", text: closedAskText(display) }],
+            details: { ...deliveryDetails(result), error: true },
+          };
+        }
         return {
           content: [{ type: "text", text: noMatchText ?? `${undeliveredText(display, result)}${resolution}` }],
           details: { ...deliveryDetails(result), ...(noMatchText ? { error: true } : {}) },
@@ -2441,7 +2483,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
             ? queuedText(display, inferredAsk ? "reply (inferred from pending ask)" : "message")
             : target.projectPane
               ? `Opened Herdr project pane ${target.projectPane.paneId} for ${target.projectPane.projectRoot} and sent message to ${targetDisplay}`
-              : inferredAsk ? `Reply sent to ${display}${resolution} (inferred from pending ask)` : `Message sent to ${display}${resolution}`,
+              : `${inferredAsk ? `Reply sent to ${display}${resolution} (inferred from pending ask)` : `Message sent to ${display}${resolution}`}${result.demoted ? `. ${LATE_REPLY_NOTE}` : ""}`,
         }, {
           type: "text",
           text: request.wake !== false && (request.wake === true || request.handover || effectiveReplyTo)
@@ -3147,8 +3189,9 @@ Usage:
   intercom({ action: "list" })                    → List active sessions
   intercom({ action: "list-cwd" })                → List sessions in the current working directory
   intercom({ action: "list-cwd", cwd: "/path" })  → List sessions in a specific directory
-  intercom({ action: "send", to: "name-or-id", message: "..." })  → Record a status notification
+  intercom({ action: "send", to: "name-or-id", message: "..." })  → Send message
   intercom({ action: "send", to: "name-or-id", message: "...", wake: true }) → Request non-blocking task attention
+  intercom({ action: "send", to: "name-or-id", message: "...", noWake: true }) → Information only: an idle receiver reads it on its next turn instead of starting one
   intercom({ action: "send", cwd: "/path", openProjectPaneIfMissing: true, message: "..." }) → Open a visible Herdr project pane when needed, then send
   intercom({ action: "ask", to: "name-or-id", message: "..." })   → Ask and wait for reply
   intercom({ action: "handover", to: "name-or-id", message: "next task" }) → Summarize this session and hand it over; the receiver acts on it
@@ -3221,6 +3264,9 @@ Usage:
       focus: Type.Optional(Type.Boolean({
         description: "For openProjectPaneIfMissing, focus the new Herdr pane. Defaults to true.",
       })),
+      noWake: Type.Optional(Type.Boolean({
+        description: "For 'send' only: true delivers the message without starting a turn in an idle receiver; it reads the message on its next turn. Use for information that needs no action or reply. Ignored when the send is a reply to an ask.",
+      })),
     }),
     constrainedSampling: { type: "json_schema", strict: "prefer" },
 
@@ -3247,7 +3293,7 @@ Usage:
         if (localAdvice) notifyIfLive(ctx, localAdvice, "info");
       }
 
-      const { action, to, message, wake, attachments, replyTo, messageId, timeoutMs, escalateTo, followUp, supersedes, retryOf, cwd, openProjectPaneIfMissing, focus } = minimalParams;
+      const { action, to, message, wake, attachments, replyTo, messageId, timeoutMs, escalateTo, followUp, supersedes, retryOf, cwd, openProjectPaneIfMissing, focus, noWake } = minimalParams;
 
       switch (action) {
         case "list": {
@@ -3372,7 +3418,7 @@ Usage:
             };
           }
           return deliverMessage(connectedClient, ctx, _signal, {
-            to, cwd, openProjectPaneIfMissing, focus, message, wake, attachments, replyTo, supersedes, retryOf,
+            to, cwd, openProjectPaneIfMissing, focus, message, wake, attachments, replyTo, supersedes, retryOf, noWake,
           });
         }
 
@@ -3416,6 +3462,12 @@ Usage:
             };
           }
 
+          if (to?.includes("@")) {
+            return {
+              content: [{ type: "text", text: `Cross-machine ask is not supported. Use send to ${to}; the peer's answer arrives as a new message.` }],
+              details: { error: true },
+            };
+          }
           const normalizedAskOptions = normalizeAskOptions(escalateTo, followUp);
           const askEscalateTo = normalizedAskOptions.escalateTo;
           const askFollowUp = normalizedAskOptions.followUp;
@@ -3675,7 +3727,7 @@ Usage:
               timestamp: Date.now(),
             });
             return {
-              content: [{ type: "text", text: result.delivery === "queued" ? queuedText(target.from.name || target.from.id, pendingReplyTo ? "reply" : "response") : pendingReplyTo ? `Reply sent to ${target.from.name || target.from.id}` : `Response sent to ${target.from.name || target.from.id}` }],
+              content: [{ type: "text", text: result.delivery === "queued" ? queuedText(target.from.name || target.from.id, pendingReplyTo ? "reply" : "response") : `${pendingReplyTo ? `Reply sent to ${target.from.name || target.from.id}` : `Response sent to ${target.from.name || target.from.id}`}${result.demoted ? `. ${LATE_REPLY_NOTE}` : ""}` }],
               details: { attention: "wake_requested", ...deliveryDetails(result), ...(pendingReplyTo ? { replyTo: pendingReplyTo } : {}) },
             };
           } catch (error) {

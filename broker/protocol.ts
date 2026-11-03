@@ -188,6 +188,10 @@ export function isMessage(value: unknown): value is Message {
     return false;
   }
 
+  if (value.lateReplyTo !== undefined && typeof value.lateReplyTo !== "string") {
+    return false;
+  }
+
   if (value.expectsReply !== undefined && typeof value.expectsReply !== "boolean") {
     return false;
   }
@@ -197,6 +201,10 @@ export function isMessage(value: unknown): value is Message {
   }
 
   if (value.wake !== undefined && typeof value.wake !== "boolean") {
+    return false;
+  }
+
+  if (value.noWake !== undefined && typeof value.noWake !== "boolean") {
     return false;
   }
 
@@ -225,6 +233,7 @@ export function messageDeliveryFingerprint(message: Message, targetId: string): 
     expectsReply: message.expectsReply,
     wakeProtocol: message.wakeProtocol,
     wake: message.wake,
+    noWake: message.noWake,
     supersedes: message.supersedes,
     retryOf: message.retryOf,
     provenance: message.provenance,
