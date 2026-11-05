@@ -91,8 +91,12 @@ export function requestFollowup(pi: Pick<ExtensionAPI, "events">, action: Follow
     const timer = setTimeout(() => finish({ ok: false, state: "unknown", reason: "Follow-up schedule readback timed out; do not resend the original business request", completion: "unknown" }), 10_000);
     const request: FollowupScheduleRequest = { version: 1, action, binding, options,
       claim: () => { claimed = true; }, respond: finish };
-    pi.events.emit(FOLLOWUP_SCHEDULE_EVENT, request);
-    if (!claimed) finish({ ok: false, state: "unknown", reason: "pi-schedule-prompt with reply-followup support is not loaded; no timer was created", completion: "unknown" });
+    try {
+      pi.events.emit(FOLLOWUP_SCHEDULE_EVENT, request);
+      if (!claimed) finish({ ok: false, state: "unknown", reason: `pi-schedule-prompt with reply-followup support did not claim ${action}; timer state is unchecked`, completion: "unknown" });
+    } catch (error) {
+      finish({ ok: false, state: "unknown", reason: `Follow-up ${action} failed: ${error instanceof Error ? error.message : String(error)}; timer state is unknown, do not resend the original business request`, completion: "unknown" });
+    }
   });
 }
 
