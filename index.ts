@@ -1115,12 +1115,21 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       if (!followupRuntimeIsCurrent(pending)) return uncheckedFollowup("Follow-up belongs to an inactive session runtime");
       const cancelled = await requestFollowup(pi, "cancel", pending.binding);
       const readback = await requestFollowup(pi, "get", pending.binding);
-      // The persisted readback is distinct from both the broker receipt and cancel acknowledgement.
-      return cancelled.ok ? readback : { ...readback, ok: false, reason: [cancelled.reason, readback.reason].filter(Boolean).join("; "), completion: "unknown" as const };
-    })().finally(() => {
-      const messageId = pending.binding.messageId;
-      setTimeout(() => { if (pendingFollowups.get(messageId) === pending) pendingFollowups.delete(messageId); }, 60_000).unref?.();
-    });
+      // Only a confirmed inactive timer permits cleanup; an uncertain retirement
+      // must keep its local marker so a later due callback cannot revive transport.
+      const inactive = readback.ok && readback.enabled === false && readback.pending === false && readback.state !== "pending";
+      if (inactive) {
+        const messageId = pending.binding.messageId;
+        setTimeout(() => { if (pendingFollowups.get(messageId) === pending) pendingFollowups.delete(messageId); }, 60_000).unref?.();
+      }
+      if (cancelled.ok && inactive) return { ...readback, completion: "unknown" as const };
+      return {
+        ...readback, ok: false, completion: "unknown" as const,
+        reason: [cancelled.reason, readback.reason, inactive
+          ? "Follow-up cancellation was not confirmed"
+          : "Follow-up retirement not confirmed: readback does not prove timer disabled and not pending"].filter(Boolean).join("; "),
+      };
+    })();
   }
   async function retireAcceptedFollowup(messageId: string, activeClient: IntercomClient, generation: number, peerSessionId?: string): Promise<{ messageId: string; result: FollowupResult }> {
     const pending = pendingFollowups.get(messageId);
@@ -2494,7 +2503,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         };
       }
       const followUpRetirement = supersedes && result.outcomeKnown && result.delivery !== "unknown"
-        ? await retireAcceptedFollowup(supersedes, connectedClient, generation, deliveredTargetId)
+        ? retireAcceptedFollowup(supersedes, connectedClient, generation, deliveredTargetId)
         : undefined;
       pi.appendEntry("intercom_sent", {
         to: display,
@@ -2522,7 +2531,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         }, ...(upgradeAdvice ? [{ type: "text" as const, text: upgradeAdvice }] : [])],
         details: {
           ...deliveryDetails(result),
-          ...(followUpRetirement ? { followUpRetirement } : {}),
+          ...(followUpRetirement ? { followUpRetirement: await followUpRetirement } : {}),
           ...(upgradeAdvice ? { runtimeUpgradeAdvice: upgradeAdvice } : {}),
           attention: request.wake !== false && (request.wake === true || request.handover || effectiveReplyTo) ? "wake_requested" : "context_only",
           ...(effectiveReplyTo ? { replyTo: effectiveReplyTo } : {}),
@@ -2749,7 +2758,10 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     if (!payload || typeof payload !== "object") return;
     const request = payload as FollowupDueRequest;
     if (request.version !== 1 || typeof request.claim !== "function" || typeof request.isCurrent !== "function" || typeof request.respond !== "function") return;
-    if (request.binding?.ownerSessionId !== currentSessionId || request.binding.intercomSessionId !== (currentIntercomSessionId ?? currentSessionId)) return;
+    if (request.binding?.ownerSessionId !== currentSessionId || request.binding.intercomSessionId !== (currentIntercomSessionId ?? currentSessionId)) {
+      request.respond({ delivered: false, unknown: true, reason: "Follow-up belongs to an inactive owner or Intercom session" });
+      return;
+    }
     request.claim();
     const generation = runtimeGeneration;
     const activeClient = client;

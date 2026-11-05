@@ -16,10 +16,10 @@ The current source candidate is **0.18.1-fork.8**, based on community **0.18.1**
 - `upstream-main`: an exact mirror of the community's `main`, with no fork commits. Never install from this branch.
 - Changes enter `main` through reviewed pull requests; existing branches and history are retained.
 
-Install the existing reproducible release (source candidacy is not publication):
+Install the matching reproducible release only after verifying its immutable Release exists (source candidacy is not publication):
 
 ```bash
-pi install git:github.com/chenhaoxiang/pi-intercom@v0.18.1-fork.7
+pi install git:github.com/chenhaoxiang/pi-intercom@v0.18.1-fork.8
 ```
 
 [GitHub Releases](https://github.com/chenhaoxiang/pi-intercom/releases) include the installable package tarball, a provenance manifest, and `SHA256SUMS`. These GitHub releases are not npm publications under the upstream author's namespace. See [release maintenance](docs/releasing.md) for asset installation and future releases.

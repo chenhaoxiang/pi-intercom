@@ -6114,7 +6114,11 @@ for (const point of ["queued", "dispatch-before-send", "after-send"] as const) t
       release();
       assert.equal(result.details?.delivered, true);
       const expected = point === "queued" ? "cancelled" : "unknown";
-      assert.equal((result.details?.followUpRetirement as { result: FollowupResult }).result.state, expected);
+      const retirement = (result.details?.followUpRetirement as { result: FollowupResult }).result;
+      assert.equal(retirement.state, expected);
+      assert.equal(retirement.ok, true, "disabled/not-pending readback is confirmed even when dispatch outcome stays UNKNOWN");
+      assert.equal(retirement.enabled, false);
+      assert.equal(retirement.pending, false);
       assert.equal(new CronStorage(cwd).getJob(job.id).followUp.state, expected);
       assert.equal(storage.getJob(job.id).enabled, false);
       assert.equal(scheduler!.getNextRun(job.id), null);
@@ -6174,6 +6178,8 @@ test("follow-up retirement: an in-flight due cannot cross a session runtime swit
     const due = { version: 1, binding: requests[0]!.binding, record: {}, jobId: "due", claimId: "claim", claim: () => { claimed = true; }, isCurrent: () => true, respond: (result: unknown) => { dueResult = result; } } as FollowupDueRequest;
     harness.pi.events.emit(FOLLOWUP_DUE_EVENT, { ...due, binding: { ...due.binding, ownerSessionId: "foreign-owner" } });
     assert.equal(claimed, false, "foreign owner due is not claimed or queried");
+    assert.deepEqual(dueResult, { delivered: false, unknown: true, reason: "Follow-up belongs to an inactive owner or Intercom session" });
+    dueResult = undefined;
     harness.pi.events.emit(FOLLOWUP_DUE_EVENT, due);
     try { await harness.emitLifecycle("session_start"); }
     finally { release(); }
@@ -6183,17 +6189,27 @@ test("follow-up retirement: an in-flight due cannot cross a session runtime swit
   });
 });
 
-test("fixed Schedule retirement: store lock failure preserves the accepted replacement and reports live old timer", { concurrency: false, skip: !scheduleSource }, async t => {
+test("fixed Schedule retirement boundary: store lock failure retains the old retirement marker beyond 60 seconds", { concurrency: false, skip: !scheduleSource }, async t => {
   const { register, CronStorage, CronScheduler } = await fixedScheduleModules();
   const cwd = mkdtempSync(path.join(tmpdir(), "ic-store-"));
   let scheduler: InstanceType<typeof CronScheduler>;
   const start = CronScheduler.prototype.start;
   t.mock.method(CronScheduler.prototype, "start", function(this: InstanceType<typeof CronScheduler>) { scheduler = this; return start.call(this); });
   try {
-    await withRetirementHarness(async ({ planner, questions, execute }) => {
+    await withRetirementHarness(async ({ harness, planner, questions, execute }) => {
       const storage = new CronStorage(cwd);
-      const old = await execute({ action: "ask", to: planner.sessionId, message: "Original", timeoutMs: 50, followUp: boundedFollowup() });
+      const old = await execute({ action: "ask", to: planner.sessionId, message: "Original", timeoutMs: 50, followUp: { ...boundedFollowup(), afterMs: 120_000 } });
       const job = storage.getAllJobs()[0]!;
+      await execute({ action: "ask", to: planner.sessionId, message: "New request", timeoutMs: 50, followUp: { ...boundedFollowup(), afterMs: 240_000 } });
+      const newJob = storage.getAllJobs()[1]!;
+      const requests: FollowupScheduleRequest[] = [];
+      harness.pi.events.on(FOLLOWUP_SCHEDULE_EVENT, payload => requests.push(payload as FollowupScheduleRequest));
+      // Re-arm only this fixture's old timer under the controlled clock, leaving
+      // storage and the new timer untouched. Stop its real timer before mocking.
+      scheduler!.removeJob(job.id);
+      const realSetTimeout = setTimeout;
+      t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
+      scheduler!.addJob(job);
       const lock = storage.getStorePath() + ".lock";
       writeFileSync(lock, "synthetic contention");
       try {
@@ -6205,8 +6221,26 @@ test("fixed Schedule retirement: store lock failure preserves the accepted repla
         assert.equal(retirement.enabled, true);
         assert.equal(new CronStorage(cwd).getJob(job.id).enabled, true);
         assert.ok(scheduler!.getNextRun(job.id));
-        assert.equal(questions.length, 2);
-      } finally { rmSync(lock); }
+        assert.equal(questions.length, 3);
+        rmSync(lock);
+        const status = t.mock.method(IntercomClient.prototype, "getMessageStatus");
+        t.mock.timers.tick(60_001);
+        t.mock.timers.tick(Date.parse(job.schedule) - Date.now() + 1);
+        await new Promise(resolve => realSetTimeout(resolve, 100));
+        assert.equal(status.mock.callCount(), 0, "unconfirmed retirement marker must still suppress transport after 60 seconds");
+        assert.equal(questions.length, 3, "no old reminder or business request replay");
+        const retired = new CronStorage(cwd).getJob(job.id);
+        assert.equal(retired.followUp.state, "unknown");
+        assert.equal(retired.claim.phase, "settled");
+        assert.equal(retired.claim.outcome, "unknown");
+        assert.equal(retired.attemptCount, 1);
+        assert.deepEqual(storage.getJob(newJob.id), newJob);
+        assert.ok(scheduler!.getNextRun(newJob.id));
+        assert.deepEqual(requests.map(request => request.action), ["cancel", "get"], "no retirement retry or polling");
+      } finally {
+        rmSync(lock, { force: true });
+        t.mock.timers.reset();
+      }
     }, { mode: "rpc" }, async harness => {
       harness.ctx.cwd = cwd;
       Object.assign(harness.ctx, { hasPendingMessages: () => false, ui: { setWidget() {} } });
@@ -6255,6 +6289,147 @@ test("fixed Schedule retirement: synthetic clock and exact binding keep dispatch
     await harness.emitLifecycle("session_shutdown");
     rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+for (const [label, readback] of [
+  ["enabled", { ok: true, state: "pending", enabled: true, pending: true }],
+  ["missing disabled", { ok: true, state: "cancelled", pending: false }],
+  ["pending state", { ok: true, state: "pending", enabled: false, pending: false }],
+  ["pending flag", { ok: true, state: "cancelled", enabled: false, pending: true }],
+  ["missing pending", { ok: true, state: "cancelled", enabled: false }],
+] as Array<[string, FollowupResult]>) test(`retirement boundary: ${label} readback cannot confirm retirement after cancel acknowledgement`, { concurrency: false }, async () => {
+  await withRetirementHarness(async ({ harness, planner, execute }) => {
+    const responder = followupResponder(harness);
+    const old = await execute({ action: "ask", to: planner.sessionId, message: "Old", timeoutMs: 50, followUp: boundedFollowup() });
+    responder.off();
+    harness.pi.events.on(FOLLOWUP_SCHEDULE_EVENT, payload => {
+      const request = payload as FollowupScheduleRequest;
+      request.claim();
+      request.respond(request.action === "cancel" ? { ok: true, state: "cancelled", enabled: false, pending: false } : readback);
+    });
+    const result = await execute({ action: "cancel", messageId: old.details?.messageId });
+    assert.equal(result.details?.delivered, true);
+    assert.notEqual(result.details?.error, true);
+    const retirement = (result.details?.followUpRetirement as { result: FollowupResult }).result;
+    assert.deepEqual({ state: retirement.state, enabled: retirement.enabled, pending: retirement.pending }, { state: readback.state, enabled: readback.enabled, pending: readback.pending }, "preserve actual readback, not the cancel acknowledgement");
+    assert.equal(retirement.ok, false);
+    assert.equal(retirement.completion, "unknown");
+    assert.match(retirement.reason!, /retirement not confirmed/i);
+  });
+});
+
+test("retirement boundary: confirmed inactive readback keeps the existing bounded marker cleanup", { concurrency: false }, async t => {
+  await withRetirementHarness(async ({ harness, planner, execute }) => {
+    const { requests } = followupResponder(harness);
+    const old = await execute({ action: "ask", to: planner.sessionId, message: "Old", timeoutMs: 50, followUp: boundedFollowup() });
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
+    try {
+      const cancelled = await execute({ action: "cancel", messageId: old.details?.messageId });
+      assert.equal((cancelled.details?.followUpRetirement as { result: FollowupResult }).result.ok, true);
+      t.mock.timers.tick(60_001);
+      const again = await execute({ action: "cancel", messageId: old.details?.messageId });
+      assert.equal(again.details?.delivered, true);
+      assert.match((again.details?.followUpRetirement as { result: FollowupResult }).result.reason!, /No exact local.*unchecked/);
+      assert.deepEqual(requests.map(request => request.action), ["create", "cancel", "get"], "cleaned bindings are not rediscovered or queried");
+    } finally { t.mock.timers.reset(); }
+  });
+});
+
+test("retirement boundary: delayed superseding send retirement does not delay sent history or inbound ask dismissal", { concurrency: false }, async () => {
+  await withRetirementHarness(async ({ harness, planner, owner, questions, execute }) => {
+    const responder = followupResponder(harness);
+    const old = await execute({ action: "ask", to: planner.sessionId, message: "Old", timeoutMs: 50, followUp: boundedFollowup() });
+    responder.off();
+    let cancel!: FollowupScheduleRequest;
+    harness.pi.events.on(FOLLOWUP_SCHEDULE_EVENT, payload => {
+      const request = payload as FollowupScheduleRequest;
+      request.claim();
+      if (request.action === "cancel") cancel = request;
+      else request.respond({ ok: true, state: "cancelled", enabled: false, pending: false, completion: "unknown" });
+    });
+    // Close the original broker reply edge first: simultaneous reciprocal asks
+    // are intentionally refused. Its delayed retirement still owns this binding.
+    assert.equal((await planner.send(owner.id, { replyTo: old.details?.messageId as string, text: "PENDING original" })).delivered, true);
+    assert.equal((await planner.send(owner.id, { messageId: "inbound-for-superseding-send", expectsReply: true, text: "Can you answer while replacing the old request?" })).delivered, true);
+    await waitForCondition(() => harness.sentMessages.some(entry => (entry.message.details as { message?: Message })?.message?.id === "inbound-for-superseding-send"), "inbound ask");
+    let settled = false;
+    const sending = execute({ action: "send", to: planner.sessionId, message: "Replacement and answer", supersedes: old.details?.messageId });
+    void sending.then(() => { settled = true; });
+    try {
+      await waitForCondition(() => !!cancel, "delayed cancel response");
+      assert.equal(settled, false);
+      await waitForCondition(() => questions.length === 2, "broker accepted the replacement");
+      await waitForCondition(() => harness.entries.some(entry => entry.type === "intercom_sent" && (entry.data as { messageId?: string }).messageId === questions[1]!.id), "sent history before optional retirement readback");
+      const pending = await execute({ action: "pending" });
+      assert.equal(pending.content[0]!.text, "No unresolved inbound asks.");
+    } finally {
+      cancel?.respond({ ok: true, state: "cancelled", enabled: false, pending: false, completion: "unknown" });
+      await sending;
+    }
+    const result = await sending;
+    assert.equal(result.details?.delivered, true);
+    assert.equal((result.details?.followUpRetirement as { result: FollowupResult }).result.ok, true);
+    assert.equal(questions.length, 2);
+  });
+});
+
+for (const mismatch of ["foreign owner", "stale Intercom session"] as const) test(`fixed Schedule retirement boundary: ${mismatch} due settles its original claim UNKNOWN without transport`, { concurrency: false, skip: !scheduleSource }, async t => {
+  const { register, CronStorage, CronScheduler } = await fixedScheduleModules();
+  const cwd = mkdtempSync(path.join(tmpdir(), "ic-foreign-"));
+  const schedulers: InstanceType<typeof CronScheduler>[] = [];
+  const start = CronScheduler.prototype.start;
+  t.mock.method(CronScheduler.prototype, "start", function(this: InstanceType<typeof CronScheduler>) { schedulers.push(this); return start.call(this); });
+  try {
+    await withRetirementHarness(async ({ harness, planner, owner, questions, execute }) => {
+      const currentStorage = new CronStorage(cwd);
+      const current = await execute({ action: "ask", to: planner.sessionId, message: "Current owner's request", timeoutMs: 50, followUp: boundedFollowup() });
+      const currentJob = currentStorage.getAllJobs()[0]!;
+      assert.equal(currentJob.followUp.messageId, current.details?.messageId);
+      let foreignHarness: ReturnType<typeof createExtensionHarness> | undefined;
+      t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
+      try {
+        const oldOwner = mismatch === "foreign owner" ? "foreign-schedule-owner" : harness.ctx.sessionManager.getSessionId();
+        const oldCwd = mismatch === "foreign owner" ? path.join(cwd, "foreign") : cwd;
+        if (mismatch === "foreign owner") {
+          foreignHarness = createExtensionHarness("foreign-schedule", { mode: "rpc", sessionId: oldOwner, ui: { setWidget() {} } });
+          foreignHarness.pi.events = harness.pi.events;
+          foreignHarness.ctx.cwd = oldCwd;
+          Object.assign(foreignHarness.ctx, { hasPendingMessages: () => false });
+          await register(foreignHarness.pi);
+          await foreignHarness.emitLifecycle("session_start");
+        }
+        const oldStorage = new CronStorage(oldCwd);
+        const binding = { ownerSessionId: oldOwner, intercomSessionId: mismatch === "foreign owner" ? owner.id : "stale-intercom-id", peerSessionId: planner.sessionId!, messageId: "old-due-request" };
+        const expiry = new Date(Date.now() + 300_000).toISOString();
+        const created = await requestFollowup(harness.pi as never, "create", binding, { requestId: "old-due", goal: "synthetic reference", phase: "old-phase", intervalMs: 1000, maxRuns: 1, expiresAt: expiry, deadlineAt: expiry });
+        assert.equal(created.ok, true);
+        const send = t.mock.method(IntercomClient.prototype, "send", async () => { throw new Error("foreign due must not send"); });
+        const status = t.mock.method(IntercomClient.prototype, "getMessageStatus", async () => { throw new Error("foreign due must not query transport"); });
+        t.mock.timers.tick(1000);
+        const stored = new CronStorage(oldCwd).findFollowUp(binding);
+        assert.equal(stored.followUp.state, "unknown");
+        assert.equal(stored.followUp.unknownReason, "Follow-up belongs to an inactive owner or Intercom session");
+        assert.equal(stored.claim.phase, "settled", "respond to the original Schedule callback rather than waiting for its deadline");
+        assert.equal(stored.claim.outcome, "unknown");
+        assert.equal(stored.claim.sessionId, oldOwner);
+        assert.equal(schedulers.at(-1)!.runtimeReadback().registered.legacyDurableBusy, false);
+        assert.equal(send.mock.callCount(), 0);
+        assert.equal(status.mock.callCount(), 0);
+        assert.deepEqual(currentStorage.getJob(currentJob.id), currentJob, "new owner's timer is not changed or adopted");
+        assert.ok(schedulers[0]!.getNextRun(currentJob.id));
+        t.mock.timers.tick(2000);
+        assert.equal(oldStorage.findFollowUp(binding).attemptCount, 1);
+        assert.equal(questions.length, 1);
+      } finally {
+        await foreignHarness?.emitLifecycle("session_shutdown");
+        t.mock.timers.reset();
+      }
+    }, { mode: "rpc" }, async harness => {
+      harness.ctx.cwd = cwd;
+      Object.assign(harness.ctx, { hasPendingMessages: () => false, ui: { setWidget() {} } });
+      await register(harness.pi);
+    });
+  } finally { rmSync(cwd, { recursive: true, force: true }); }
 });
 
 for (const disposition of ["retained", "cancelled", "superseded"] as const) test(`a ${disposition} old ask's late reply cannot settle the current waiter or its follow-up`, { concurrency: false }, async () => {

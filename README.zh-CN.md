@@ -16,10 +16,10 @@
 - `upstream-main`：仅镜像社区 `main`，不加入 fork 提交，也不作为安装来源。
 - 改动通过经过审核的 PR 合入 `main`；保留现有分支和历史。
 
-安装现有固定版本（源代码候选不代表已发布）：
+确认匹配的不可变 Release 已存在后再安装固定版本（源代码候选不代表已发布）：
 
 ```bash
-pi install git:github.com/chenhaoxiang/pi-intercom@v0.18.1-fork.7
+pi install git:github.com/chenhaoxiang/pi-intercom@v0.18.1-fork.8
 ```
 
 [GitHub Releases](https://github.com/chenhaoxiang/pi-intercom/releases) 提供可安装的包、来源清单和 `SHA256SUMS` 校验文件；这不是向上游作者的 npm 命名空间发布。发布及制品安装流程见[维护说明](docs/releasing.md)。
