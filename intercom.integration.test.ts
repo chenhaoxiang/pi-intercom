@@ -12,6 +12,7 @@ import type { MessageRenderer } from "@earendil-works/pi-coding-agent";
 import { validateToolArguments } from "@earendil-works/pi-ai";
 import { InlineMessageComponent } from "./ui/inline-message.ts";
 import { ReplyTracker } from "./reply-tracker.ts";
+import { FOLLOWUP_OBSERVED_EVENT, FOLLOWUP_SCHEDULE_EVENT, type FollowupObservation, type FollowupScheduleRequest } from "./followup-api.ts";
 import { runCli } from "./cli.ts";
 import type { BrokerMessage, Message, MessageStatus, SessionInfo } from "./types.ts";
 import type { SendResult } from "./broker/client.ts";
@@ -1440,6 +1441,86 @@ for (const confirmsReceipts of [false, true]) test(`broker late reply replays de
   } finally {
     raw?.socket.destroy();
     await asker.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+for (const action of ["cancel", "supersede"] as const) {
+  for (const confirmsReceipts of [false, true]) test(`broker ${action} retires only the old ask before a late reply with receipts=${confirmsReceipts}`, { concurrency: false }, async () => {
+    const { planner, orchestrator, cleanup } = await setupClients();
+    const asker = new IntercomClient();
+    const received: Message[] = [];
+    const questions: Message[] = [];
+    asker.on("message", (_from, message) => {
+      received.push(message);
+      asker.sendMessageReceipt({ messageId: message.id, status: "receiver_received", timestamp: Date.now() });
+    });
+    orchestrator.on("message", (_from, message) => questions.push(message));
+    try {
+      await asker.connect({ name: "lifecycle-asker", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now(), acknowledgesReceipts: confirmsReceipts });
+      assert.equal((await asker.send(orchestrator.sessionId!, { messageId: "old-question", text: "Original question?", expectsReply: true })).delivered, true);
+      if (action === "cancel") assert.equal((await asker.cancelMessage("old-question")).delivered, true);
+      assert.equal((await asker.send(orchestrator.sessionId!, {
+        messageId: "current-question", text: "Current question?", expectsReply: true,
+        ...(action === "supersede" ? { supersedes: "old-question" } : {}),
+      })).delivered, true);
+
+      const lateReply = { messageId: "old-answer", text: "Answer to the original question only.", replyTo: "old-question" };
+      const result = await orchestrator.send(asker.sessionId!, lateReply);
+      assert.equal(result.delivered, true);
+      assert.equal(result.demoted, "late_reply", "retired ask must not accept an active reply edge");
+      const late = await waitForReplyMessage(received, "old-answer");
+      assert.equal(late.replyTo, undefined);
+      assert.equal(late.lateReplyTo, "old-question");
+      assert.equal(late.content.text, lateReply.text);
+      assert.equal(existsSync(pendingAskRecordPath("old-question")), false);
+      assert.deepEqual((await asker.listPendingAsks()).map(ask => ask.messageId), ["current-question"]);
+      const oldStatus = await asker.getMessageStatus("old-question");
+      assert.equal(oldStatus.code, action === "cancel" ? "E_DELIVERY_CANCELLED" : "E_DELIVERY_SUPERSEDED");
+      assert.equal(oldStatus.replyState, "expired");
+      assert.equal(oldStatus.completion, "unknown");
+      assert.equal((await asker.getMessageStatus("current-question")).replyState, "pending");
+
+      const replay = await orchestrator.send(asker.sessionId!, lateReply);
+      assert.equal(replay.demoted, "late_reply");
+      assert.equal(received.filter(message => message.id === "old-answer").length, 1);
+      assert.equal((await planner.send(asker.sessionId!, { text: "Wrong peer", replyTo: "old-question" })).code, "E_REPLY_TARGET");
+      assert.equal((await orchestrator.send(planner.sessionId!, { text: "Wrong asker", replyTo: "old-question" })).code, "E_REPLY_TARGET");
+
+      const partialText = "Only part A is answered; part B is still pending. No full approval.";
+      const current = await orchestrator.send(asker.sessionId!, { messageId: "current-answer", text: partialText, replyTo: "current-question" });
+      assert.equal(current.delivered, true);
+      assert.equal(current.demoted, undefined);
+      assert.equal((await waitForReplyMessage(received, "current-answer")).content.text, partialText);
+      const status = await asker.getMessageStatus("current-question");
+      assert.equal(status.replyState, "answered", "answered means a transport reply, not full approval");
+      assert.equal(status.execution, "unknown");
+      assert.equal(status.completion, "unknown");
+      assert.deepEqual(questions.map(message => message.id), ["old-question", "current-question"], "no original business request is replayed");
+    } finally {
+      await asker.disconnect().catch(() => undefined);
+      await cleanup();
+    }
+  });
+}
+
+test("broker rejected supersedes preserve the original pending ask", { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await setupClients();
+  const outsider = new IntercomClient();
+  try {
+    await outsider.connect({ name: "outsider", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() });
+    assert.equal((await planner.send(orchestrator.sessionId!, { messageId: "protected-question", text: "Original?", expectsReply: true })).delivered, true);
+    assert.equal((await outsider.send(orchestrator.sessionId!, { text: "Wrong sender", supersedes: "protected-question" })).code, "E_SUPERSEDE_TARGET");
+    assert.equal((await planner.send(outsider.sessionId!, { text: "Wrong receiver", supersedes: "protected-question" })).code, "E_SUPERSEDE_TARGET");
+    assert.deepEqual((await planner.listPendingAsks()).map(ask => ask.messageId), ["protected-question"]);
+    assert.equal((await planner.getMessageStatus("protected-question")).replyState, "pending");
+    const reply = waitForReply(planner, "protected-question");
+    const result = await orchestrator.send(planner.sessionId!, { text: "Still a valid answer", replyTo: "protected-question" });
+    assert.equal(result.delivered, true);
+    assert.equal(result.demoted, undefined);
+    assert.equal((await reply).message.replyTo, "protected-question");
+  } finally {
+    await outsider.disconnect().catch(() => undefined);
     await cleanup();
   }
 });
@@ -4018,6 +4099,12 @@ test("same-sender supersede reports an already-steered inbound message", { concu
     assert.equal(harness.sentMessages.length, 2);
     assert.deepEqual(receipts.get("superseded-message"), ["receiver_received", "acknowledged", "injected", "superseded"]);
     assert.deepEqual(receipts.get("replacement-message"), ["receiver_received", "acknowledged", "injected"]);
+    const tool = harness.tools.find(tool => tool.name === "intercom")!;
+    const pending = await tool.execute("superseded-pending", { action: "pending" }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(pending.content[0]?.text, "No unresolved inbound asks.", "durable pending must not restore a dismissed superseded ask");
+    const staleReply = await tool.execute("superseded-reply", { action: "reply", replyTo: "superseded-message", message: "Obsolete answer" }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(staleReply.details?.code, "E_INTERCOM_INVALID_PARAMETERS");
+    assert.equal(staleReply.details?.state, "NOT_SENT");
     unsubscribeReceipts();
   } finally {
     await harness.emitLifecycle("session_shutdown");
@@ -4717,6 +4804,32 @@ test("broker rehydrates pending ask routing after restart and preserves exact re
   } finally {
     await replacementPlanner?.disconnect().catch(() => undefined);
     await replacementOrchestrator?.disconnect().catch(() => undefined);
+    await cleanup();
+  }
+});
+
+test("broker restart cannot rehydrate a superseded ask but preserves its replacement", { concurrency: false }, async () => {
+  const { planner, orchestrator, restartBroker, cleanup } = await setupClients();
+  const plannerId = planner.sessionId!;
+  const orchestratorId = orchestrator.sessionId!;
+  const replacementPlanner = new IntercomClient();
+  const replacementOrchestrator = new IntercomClient();
+  try {
+    assert.equal((await planner.send(orchestratorId, { messageId: "retired-before-restart", text: "Old?", expectsReply: true })).delivered, true);
+    assert.equal((await planner.send(orchestratorId, { messageId: "current-after-restart", text: "New?", expectsReply: true, supersedes: "retired-before-restart" })).delivered, true);
+    await planner.disconnect();
+    await orchestrator.disconnect();
+    await restartBroker();
+    await replacementPlanner.connect({ name: "planner", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, plannerId);
+    await replacementOrchestrator.connect({ name: "orchestrator", cwd: repoDir, model: "test-model", pid: process.pid, startedAt: Date.now(), lastActivity: Date.now() }, orchestratorId);
+    assert.deepEqual((await replacementOrchestrator.listPendingAsks()).map(ask => ask.messageId), ["current-after-restart"]);
+    assert.equal((await replacementOrchestrator.send(plannerId, { text: "Stale", replyTo: "retired-before-restart" })).code, "E_REPLY_TARGET", "restart loses late-reply provenance, not permission to revive the old ask");
+    const reply = waitForReply(replacementPlanner, "current-after-restart");
+    assert.equal((await replacementOrchestrator.send(plannerId, { text: "Current", replyTo: "current-after-restart" })).delivered, true);
+    assert.equal((await reply).message.replyTo, "current-after-restart");
+  } finally {
+    await replacementPlanner.disconnect().catch(() => undefined);
+    await replacementOrchestrator.disconnect().catch(() => undefined);
     await cleanup();
   }
 });
@@ -5669,6 +5782,88 @@ test("intercom reply to an ask that is no longer open delivers it or explains ho
     await harness.emitLifecycle("session_shutdown");
     await cleanup();
   }
+});
+
+for (const disposition of ["retained", "cancelled", "superseded"] as const) test(`a ${disposition} old ask's late reply cannot settle the current waiter or its follow-up`, { concurrency: false }, async () => {
+  await withIntercomConfig({ inboundTrigger: "replies" }, async () => {
+    const { planner, cleanup } = await setupClients();
+    const { default: register } = await import("./index.ts");
+    const harness = createExtensionHarness("lifecycle-owner");
+    const requests: FollowupScheduleRequest[] = [];
+    const observations: FollowupObservation[] = [];
+    const questions: Message[] = [];
+    const controller = new AbortController();
+    let currentResult: Promise<CapturedToolResult> | undefined;
+    // Only the existing process-local schedule seam is substituted. Both asks,
+    // controls, status queries and replies go through the real synthetic broker.
+    harness.pi.events.on(FOLLOWUP_SCHEDULE_EVENT, payload => {
+      const request = payload as FollowupScheduleRequest;
+      requests.push(request);
+      request.claim();
+      request.respond({ ok: true, state: request.action === "cancel" ? "cancelled" : "pending", completion: "unknown" });
+    });
+    harness.pi.events.on(FOLLOWUP_OBSERVED_EVENT, payload => observations.push(payload as FollowupObservation));
+    planner.on("message", (_from, message) => questions.push(message));
+    try {
+      register(harness.pi as never);
+      await harness.emitLifecycle("session_start");
+      const owner = await waitForSessionByName(planner, "lifecycle-owner");
+      const tool = harness.tools.find(tool => tool.name === "intercom")!;
+      const followUp = { afterMs: 60_000, expiresAt: new Date(Date.now() + 300_000).toISOString(), goal: "synthetic decision", phase: "old-phase" };
+      const timedOut = await tool.execute("old-phase", { action: "ask", to: planner.sessionId, message: "Original question", timeoutMs: 100, followUp }, controller.signal, undefined, harness.ctx);
+      assert.equal(timedOut.details?.code, "E_ASK_TIMEOUT");
+      const oldId = timedOut.details?.messageId as string;
+      assert.equal(questions[0]?.id, oldId);
+      if (disposition === "cancelled") {
+        const cancel = await tool.execute("cancel-old", { action: "cancel", messageId: oldId }, controller.signal, undefined, harness.ctx);
+        assert.equal(cancel.details?.delivered, true);
+      }
+      let currentSettled = false;
+      currentResult = tool.execute("current-phase", {
+        action: "ask", to: planner.sessionId, message: "Current question", timeoutMs: 3000,
+        followUp: { ...followUp, phase: "current-phase" },
+        ...(disposition === "superseded" ? { supersedes: oldId } : {}),
+      }, controller.signal, undefined, harness.ctx);
+      void currentResult.then(() => { currentSettled = true; });
+      await waitForCondition(() => requests.filter(request => request.action === "create").length === 2, "both exact follow-up bindings");
+      const currentId = questions[1]!.id;
+      const lateReply = { messageId: "old-phase-reply", text: "Part A only; not full approval.", replyTo: oldId, wake: false };
+      const late = await planner.send(owner.id, lateReply);
+      assert.equal(late.delivered, true);
+      assert.equal(late.demoted, disposition === "retained" ? undefined : "late_reply");
+      await waitForCondition(() => harness.sentMessages.length === 1, "old answer evidence injection");
+      const inbound = harness.sentMessages[0]!.message.details as { message: Message };
+      assert.equal(inbound.message.replyTo, disposition === "retained" ? oldId : undefined);
+      assert.equal(inbound.message.lateReplyTo, disposition === "retained" ? undefined : oldId);
+      assert.equal(inbound.message.content.text, lateReply.text);
+      assert.equal(currentSettled, false, "an old response must not settle a newer ask");
+      assert.equal(requests.filter(request => request.action === "cancel" && request.binding.messageId === currentId).length, 0);
+      assert.equal(observations.filter(event => event.kind === "reply").length, disposition === "retained" ? 1 : 0);
+      if (disposition === "retained") assert.equal(requests.filter(request => request.action === "cancel" && request.binding.messageId === oldId).length, 1);
+      const wakes = nativeWakeCount(harness);
+      if (disposition !== "retained") assert.equal(wakes, 0, "a demoted quiet reply does not gain actionable reply intent");
+
+      assert.equal((await planner.send(owner.id, lateReply)).demoted, late.demoted);
+      assert.equal(harness.sentMessages.length, 1, "same reply id is not injected twice");
+      assert.equal(nativeWakeCount(harness), wakes, "replay cannot add a second wake");
+      assert.equal(observations.filter(event => event.kind === "reply").length, disposition === "retained" ? 1 : 0);
+      const partialText = "Part B remains pending; only part A is confirmed.";
+      assert.equal((await planner.send(owner.id, { text: partialText, replyTo: currentId })).delivered, true);
+      const result = await currentResult;
+      assert.notEqual(result.details?.error, true);
+      assert.match(result.content[0]!.text, /Part B remains pending; only part A is confirmed\./);
+      assert.equal((result.details?.followUp as { completion?: string }).completion, "unknown");
+      assert.equal(requests.filter(request => request.action === "cancel" && request.binding.messageId === currentId).length, 1);
+      const status = await tool.execute("current-status", { action: "status", messageId: currentId }, controller.signal, undefined, harness.ctx);
+      assert.equal(status.details?.completion, "unknown");
+      assert.deepEqual(questions.map(message => message.id), [oldId, currentId], "no business action or reminder is replayed by Intercom");
+    } finally {
+      controller.abort();
+      await currentResult;
+      await harness.emitLifecycle("session_shutdown");
+      await cleanup();
+    }
+  });
 });
 
 test("a late reply is labelled in the asker's inbound message metadata", { concurrency: false }, async () => {

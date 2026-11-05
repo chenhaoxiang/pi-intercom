@@ -868,6 +868,15 @@ class IntercomBroker {
               from: fromSession.info,
               control,
             });
+            const supersededEdgeKey = scopedMessageKey(fromSession.scopeId, message.supersedes);
+            const supersededEdge = this.askEdges.get(supersededEdgeKey);
+            if (supersededEdge?.from === currentKey && supersededEdge.to === target.key) {
+              // A replacement retires the old reply edge just like explicit cancellation.
+              // Keep messageReceiptRoutes so a real late answer retains lateReplyTo
+              // without resolving a waiter or marking either ask answered.
+              this.askEdges.delete(supersededEdgeKey);
+              this.removePendingAskRecord(message.supersedes, fromSession.scopeId);
+            }
             this.updateDeliveryRecord(currentKey, message.supersedes, "failed", `Superseded by ${message.id}`, "E_DELIVERY_SUPERSEDED");
           }
           this.messageReceiptRoutes.set(scopedMessageKey(fromSession.scopeId, message.id), { from: currentKey, to: target.key, ...(message.expectsReply ? { expectsReply: true } : {}), createdAt: brokerReceivedAt });
