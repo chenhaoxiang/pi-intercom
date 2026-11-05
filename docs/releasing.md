@@ -22,7 +22,7 @@ Applies only to chenhaoxiang/pi-intercom. The community project remains [nicobai
 
 ## Baseline for this release
 
-The current source candidate is **0.18.1-fork.6**, integrating community **0.18.1** through `4b387e8001167eb949e6697d089b6cd6117de761`. Previous **0.18.1-fork.5** remains available for rollback. See [the 0.18.1 synchronization report](maintenance/2026-10-28-community-0.18.1.md) for retained contracts and provider-free validation. Exact publication, fresh-download and installed-byte acceptance are recorded by the matching immutable Release; source metadata alone is not proof of runtime activation.
+The current source candidate is **0.18.1-fork.7**, retaining community **0.18.1** through `4b387e8001167eb949e6697d089b6cd6117de761` and retiring the old reply edge/pending record on accepted same-peer supersede. Previous **0.18.1-fork.6** remains available for rollback. The broker must load this version for the fix; do not restart the healthy shared broker during installation. See [the 0.18.1 synchronization report](maintenance/2026-10-28-community-0.18.1.md) for retained contracts and provider-free validation. Exact publication, fresh-download and installed-byte acceptance are recorded by the matching immutable Release; source metadata alone is not proof of runtime activation.
 
 ## Publish every version
 
