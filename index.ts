@@ -41,7 +41,7 @@ import { listMachineAgents, listSavedMachines, parseCrossMachineTarget } from ".
 import { formatHandoverMessage, generateHandoverBody, readGitState } from "./handover.ts";
 import { LOADED_INTERCOM_VERSION, runtimeLabel, selectedLocalRuntimeVersion, createRuntimeAdvisories, createPeerUpgradeAdvisories, createPeerVersionObservations } from "./runtime-version.ts";
 import { isIdleWakePending, releaseIdleWake, reserveIdleWake, supportsNativeCustomTurns } from "./idle-wake.ts";
-import { FOLLOWUP_CANCEL_TRANSPORT_EVENT, FOLLOWUP_DUE_EVENT, FOLLOWUP_OBSERVED_EVENT, requestFollowup, followupStatusText, type FollowupCancelTransportRequest, type FollowupDueRequest, type FollowupOptions, type FollowupObservation } from "./followup-api.ts";
+import { FOLLOWUP_CANCEL_TRANSPORT_EVENT, FOLLOWUP_DUE_EVENT, FOLLOWUP_OBSERVED_EVENT, requestFollowup, followupStatusText, type FollowupCancelTransportRequest, type FollowupDueRequest, type FollowupOptions, type FollowupObservation, type FollowupResult } from "./followup-api.ts";
 
 const INTERCOM_TOOL_NAME = "intercom";
 const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
@@ -1091,29 +1091,56 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
   } | null = null;
   interface PendingFollowup {
     binding: { ownerSessionId: string; intercomSessionId: string; peerSessionId: string; messageId: string };
+    runtimeGeneration: number;
     options: FollowupOptions;
-    createPromise?: Promise<import("./followup-api.ts").FollowupResult>;
-    cancelPromise?: Promise<import("./followup-api.ts").FollowupResult>;
+    createPromise?: Promise<FollowupResult>;
+    cancelPromise?: Promise<FollowupResult>;
     reply?: Message;
     cancelled?: boolean;
   }
   const pendingFollowups = new Map<string, PendingFollowup>();
-  async function cancelFollowupForReply(messageId: string, from: SessionInfo, reply: Message): Promise<import("./followup-api.ts").FollowupResult | undefined> {
-    const pending = pendingFollowups.get(messageId);
-    if (!pending || pending.binding.peerSessionId !== from.id || reply.replyTo !== messageId) return undefined;
-    pending.reply = reply;
-    pending.cancelPromise ??= (async () => {
+  function followupRuntimeIsCurrent(pending: PendingFollowup): boolean {
+    return pending.runtimeGeneration === runtimeGeneration
+      && pending.binding.ownerSessionId === currentSessionId
+      && pending.binding.intercomSessionId === (currentIntercomSessionId ?? currentSessionId);
+  }
+  function uncheckedFollowup(reason: string): FollowupResult {
+    return { ok: false, state: "unknown", reason: `${reason}; timer state is unchecked. Do not replay the original business request.`, completion: "unknown" };
+  }
+  function cancelPendingFollowup(pending: PendingFollowup): Promise<FollowupResult> {
+    // Mark before awaiting create: a delayed create or due callback must not revive it.
+    pending.cancelled = true;
+    return pending.cancelPromise ??= (async () => {
       if (pending.createPromise) await pending.createPromise.catch(() => undefined);
-      return requestFollowup(pi, "cancel", pending.binding);
-    })();
-    const result = await pending.cancelPromise;
-    setTimeout(() => { if (pendingFollowups.get(messageId) === pending) pendingFollowups.delete(messageId); }, 60_000).unref?.();
-    return result;
+      if (!followupRuntimeIsCurrent(pending)) return uncheckedFollowup("Follow-up belongs to an inactive session runtime");
+      const cancelled = await requestFollowup(pi, "cancel", pending.binding);
+      const readback = await requestFollowup(pi, "get", pending.binding);
+      // The persisted readback is distinct from both the broker receipt and cancel acknowledgement.
+      return cancelled.ok ? readback : { ...readback, ok: false, reason: [cancelled.reason, readback.reason].filter(Boolean).join("; "), completion: "unknown" as const };
+    })().finally(() => {
+      const messageId = pending.binding.messageId;
+      setTimeout(() => { if (pendingFollowups.get(messageId) === pending) pendingFollowups.delete(messageId); }, 60_000).unref?.();
+    });
+  }
+  async function retireAcceptedFollowup(messageId: string, activeClient: IntercomClient, generation: number, peerSessionId?: string): Promise<{ messageId: string; result: FollowupResult }> {
+    const pending = pendingFollowups.get(messageId);
+    if (!pending || !followupRuntimeIsCurrent(pending) || generation !== runtimeGeneration
+      || client !== activeClient || pending.binding.intercomSessionId !== activeClient.sessionId
+      || (peerSessionId !== undefined && pending.binding.peerSessionId !== peerSessionId)) {
+      return { messageId, result: uncheckedFollowup("No exact local follow-up binding for this accepted action in the current owner/runtime") };
+    }
+    return { messageId, result: await cancelPendingFollowup(pending) };
+  }
+  async function cancelFollowupForReply(messageId: string, from: SessionInfo, reply: Message): Promise<FollowupResult | undefined> {
+    const pending = pendingFollowups.get(messageId);
+    if (!pending || !followupRuntimeIsCurrent(pending) || pending.binding.peerSessionId !== from.id || reply.replyTo !== messageId) return undefined;
+    pending.reply = reply;
+    return cancelPendingFollowup(pending);
   }
   function observeFollowupReply(from: SessionInfo, message: Message): void {
     if (!message.replyTo) return;
     const pending = pendingFollowups.get(message.replyTo);
-    if (!pending || pending.binding.peerSessionId !== from.id) return;
+    if (!pending || !followupRuntimeIsCurrent(pending) || pending.binding.peerSessionId !== from.id) return;
     void cancelFollowupForReply(message.replyTo, from, message).catch(() => undefined);
     try {
       pi.events.emit(FOLLOWUP_OBSERVED_EVENT, {
@@ -1129,13 +1156,12 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       } satisfies FollowupObservation);
     } catch { /* Observation is diagnostic; exact reply still resolves the waiter. */ }
   }
-  async function armFollowup(pending: PendingFollowup): Promise<import("./followup-api.ts").FollowupResult> {
+  async function armFollowup(pending: PendingFollowup): Promise<FollowupResult> {
+    if (!followupRuntimeIsCurrent(pending)) return uncheckedFollowup("Follow-up belongs to an inactive session runtime");
+    if (pending.cancelled && !pending.createPromise) return cancelPendingFollowup(pending);
     pending.createPromise ??= requestFollowup(pi, "create", pending.binding, pending.options);
     const created = await pending.createPromise;
-    if (pending.reply || pending.cancelled) {
-      pending.cancelPromise ??= requestFollowup(pi, "cancel", pending.binding);
-      return pending.cancelPromise;
-    }
+    if (pending.reply || pending.cancelled) return cancelPendingFollowup(pending);
     return created;
   }
   function waitForReply(from: string, replyTo: string, signal?: AbortSignal, cancelOnAbort?: () => void, getDeliveryState: () => string = () => "unknown", timeoutMs = askTimeoutMs): Promise<Message> {
@@ -2304,6 +2330,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     request: DeliveryRequest,
   ): Promise<IntercomToolResult> {
     const { to, cwd, openProjectPaneIfMissing, focus, message, attachments, replyTo, supersedes, retryOf, noWake } = request;
+    const generation = runtimeGeneration;
     try {
       const crossMachineTarget = Boolean(to?.includes("@"));
       const crossMachineRestriction = explicitCrossMachineSendRestriction({
@@ -2466,6 +2493,9 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
           details: { ...deliveryDetails(result), ...(noMatchText ? { error: true } : {}) },
         };
       }
+      const followUpRetirement = supersedes && result.outcomeKnown && result.delivery !== "unknown"
+        ? await retireAcceptedFollowup(supersedes, connectedClient, generation, deliveredTargetId)
+        : undefined;
       pi.appendEntry("intercom_sent", {
         to: display,
         message: { text: message, attachments, replyTo: effectiveReplyTo, supersedes, retryOf, wakeProtocol: 1, wake: request.wake ?? (request.handover || effectiveReplyTo ? true : undefined) },
@@ -2492,6 +2522,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         }, ...(upgradeAdvice ? [{ type: "text" as const, text: upgradeAdvice }] : [])],
         details: {
           ...deliveryDetails(result),
+          ...(followUpRetirement ? { followUpRetirement } : {}),
           ...(upgradeAdvice ? { runtimeUpgradeAdvice: upgradeAdvice } : {}),
           attention: request.wake !== false && (request.wake === true || request.handover || effectiveReplyTo) ? "wake_requested" : "context_only",
           ...(effectiveReplyTo ? { replyTo: effectiveReplyTo } : {}),
@@ -2718,15 +2749,22 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     if (!payload || typeof payload !== "object") return;
     const request = payload as FollowupDueRequest;
     if (request.version !== 1 || typeof request.claim !== "function" || typeof request.isCurrent !== "function" || typeof request.respond !== "function") return;
+    if (request.binding?.ownerSessionId !== currentSessionId || request.binding.intercomSessionId !== (currentIntercomSessionId ?? currentSessionId)) return;
     request.claim();
+    const generation = runtimeGeneration;
+    const activeClient = client;
+    const pending = pendingFollowups.get(request.binding.messageId);
+    const retired = () => pending?.binding.ownerSessionId === request.binding.ownerSessionId
+      && pending.binding.intercomSessionId === request.binding.intercomSessionId
+      && pending.binding.peerSessionId === request.binding.peerSessionId && pending.cancelled;
+    const isCurrent = () => generation === runtimeGeneration && client === activeClient && !retired() && request.isCurrent();
     void (async () => {
-      const activeClient = client;
-      if (!activeClient?.isConnected() || !request.isCurrent()) {
+      if (!activeClient?.isConnected() || !isCurrent()) {
         request.respond({ delivered: false, unknown: true, reason: "Follow-up was cancelled, expired, or Intercom is disconnected before send" });
         return;
       }
       const status = await queryMessageStatusBounded(activeClient, request.binding.messageId, "unknown");
-      if (!request.isCurrent()) {
+      if (!isCurrent()) {
         request.respond({ delivered: false, unknown: true, reason: "Exact reply/cancel won the race before follow-up send" });
         return;
       }
@@ -2738,7 +2776,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         request.respond({ delivered: false, unknown: true, reason: getErrorMessage(error) });
         return;
       }
-      if (!request.isCurrent()) {
+      if (!isCurrent()) {
         if (result.delivered) void activeClient.cancelMessage(result.id).catch(() => undefined);
         request.respond({ delivered: false, unknown: true, messageId: result.id, reason: "Exact reply/cancel won after follow-up transport; queued wake cancellation was requested" });
         return;
@@ -3390,6 +3428,7 @@ Usage:
             };
           }
           try {
+            const generation = runtimeGeneration;
             const result = await connectedClient.cancelMessage(messageId);
             if (!result.delivered) {
               const errorText = result.reason ?? "Message may not exist or may belong to another sender.";
@@ -3398,9 +3437,12 @@ Usage:
                 details: { messageId, delivered: false, reason: result.reason },
               };
             }
+            const followUpRetirement = result.outcomeKnown && result.delivery !== "unknown"
+              ? await retireAcceptedFollowup(messageId, connectedClient, generation)
+              : undefined;
             return {
               content: [{ type: "text", text: `Cancellation requested for ${messageId}` }],
-              details: { messageId, delivered: true },
+              details: { messageId, delivered: true, ...(followUpRetirement ? { followUpRetirement } : {}) },
             };
           } catch (error) {
             return {
@@ -3486,6 +3528,9 @@ Usage:
           let deliveryState = "created";
           let questionId: string | null = null;
           let askTargetForFailure = to ?? cwd ?? "target";
+          const generation = runtimeGeneration;
+          const ownerSessionId = ctx.sessionManager.getSessionId();
+          let followupRetirement: ReturnType<typeof retireAcceptedFollowup> | undefined;
 
           try {
             if (openProjectPaneIfMissing && !cwd) {
@@ -3538,19 +3583,23 @@ Usage:
                 details: { error: true, ...deliveryDetails(sendResult), ...parameterWarningDetails(parameterWarnings) },
               };
             }
+            // Start immediately after acceptance, not after the replacement answer/timeout.
+            if (supersedes && sendResult.outcomeKnown && sendResult.delivery !== "unknown") {
+              followupRetirement = retireAcceptedFollowup(supersedes, connectedClient, generation, deliveredPeerId ?? sendTo);
+            }
             pi.appendEntry("intercom_sent", {
               to: askTarget,
               message: { text: message, attachments, replyTo, supersedes, retryOf },
               messageId: sendResult.id,
               timestamp: Date.now(),
             });
-            let followupPromise: Promise<import("./followup-api.ts").FollowupResult> | undefined;
+            let followupPromise: Promise<FollowupResult> | undefined;
             if (askFollowUp) {
               const afterMs = askFollowUp.afterMs;
               const expiresAt = Date.parse(askFollowUp.expiresAt);
-              const ownerSessionId = ctx.sessionManager.getSessionId();
               const intercomSessionId = connectedClient.sessionId ?? currentIntercomSessionId ?? ownerSessionId;
               const pending: PendingFollowup = {
+                runtimeGeneration: generation,
                 binding: { ownerSessionId, intercomSessionId, peerSessionId: deliveredPeerId ?? sendTo, messageId: sendResult.id },
                 options: {
                   requestId: _toolCallId,
@@ -3586,12 +3635,14 @@ Usage:
               details: {
                 attention: "wake_requested",
                 ...(followupReadback ? { followUp: followupReadback } : askFollowUp ? { followUp: { state: "pending", completion: "unknown" } } : {}),
+                ...(followupRetirement ? { followUpRetirement: await followupRetirement } : {}),
                 ...parameterWarningDetails(parameterWarnings),
                 ...(target.projectPane ? { openedProjectPane: true, paneId: target.projectPane.paneId, projectRoot: target.projectPane.projectRoot } : {}),
               },
             };
           } catch (error) {
             if (questionId) rejectReplyWaiter(toError(error), questionId);
+            const retirementDetails = followupRetirement ? { followUpRetirement: await followupRetirement } : {};
             if (error instanceof IntercomAskTimeoutError && questionId) {
               const status = await queryMessageStatusBounded(connectedClient, questionId, latestDeliveryState(questionId, deliveryState));
               const escalation = await escalateAskTimeout(connectedClient, {
@@ -3608,6 +3659,7 @@ Usage:
                   error: true,
                   state: "UNKNOWN",
                   code: "E_ASK_TIMEOUT",
+                  ...retirementDetails,
                   timeoutMs: askWaitMs,
                   messageId: questionId,
                   deliveryState: receipt,
@@ -3627,6 +3679,7 @@ Usage:
                   error: true,
                   state: "UNKNOWN",
                   code: "E_ASK_CANCELLED",
+                  ...retirementDetails,
                   messageId: questionId,
                   deliveryState: receipt,
                   ...messageStatusDetails(status),
@@ -3636,7 +3689,7 @@ Usage:
             }
             return {
               content: [{ type: "text", text: appendParameterWarnings(`Failed: ${getErrorMessage(error)}`, parameterWarnings) }],
-              details: { error: true, ...(questionId ? { messageId: questionId, deliveryState: latestDeliveryState(questionId, deliveryState) } : {}), ...parameterWarningDetails(parameterWarnings) },
+              details: { error: true, ...retirementDetails, ...(questionId ? { messageId: questionId, deliveryState: latestDeliveryState(questionId, deliveryState) } : {}), ...parameterWarningDetails(parameterWarnings) },
             };
           }
         }

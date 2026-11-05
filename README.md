@@ -10,13 +10,13 @@ Direct 1:1 messaging between Pi sessions on the same machine. This repository is
 
 ## Releases and branch policy
 
-The current source/release candidate is **0.18.1-fork.7**, based on community **0.18.1**, fixing superseded asks retaining a reply edge and durable pending record; the previous **0.18.1-fork.6** remains available for rollback. Verify the matching immutable Release before installation. Fork releases use `<community-version>-fork.<revision>`; the fork revision increases without pretending to be a new upstream release.
+The current source candidate is **0.18.1-fork.8**, based on community **0.18.1**. Accepted cancel/same-peer supersede now retires and reads back only the exact locally tracked old follow-up; timer uncertainty stays separate from the main message result. The released **0.18.1-fork.7** remains the installation/rollback reference until the candidate is reviewed and published. Verify the matching immutable Release before installation. Fork releases use `<community-version>-fork.<revision>`; the fork revision increases without pretending to be a new upstream release.
 
 - `main`: our maintained integration and release branch, including fork fixes.
 - `upstream-main`: an exact mirror of the community's `main`, with no fork commits. Never install from this branch.
 - Changes enter `main` through reviewed pull requests; existing branches and history are retained.
 
-Install a reproducible release:
+Install the existing reproducible release (source candidacy is not publication):
 
 ```bash
 pi install git:github.com/chenhaoxiang/pi-intercom@v0.18.1-fork.7
