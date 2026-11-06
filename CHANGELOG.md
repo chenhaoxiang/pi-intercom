@@ -4,6 +4,11 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.18.1-fork.9] - 2026-11-06
+
+- Expose retained broker replacement/reply relationships through the existing sender-scoped message-status result. Late replies retain their original reference and cannot answer a replacement ask.
+- Keep transport correlation separate from execution, business completion and approval; old/missing/unsupported metadata stays unknown. No new event/query or shared-broker restart.
+
 ## [0.18.1-fork.6] - 2026-11-03
 
 ### Added

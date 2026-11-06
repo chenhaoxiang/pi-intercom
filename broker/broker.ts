@@ -18,6 +18,7 @@ import {
 } from "./paths.ts";
 import { getAskTimeoutMs } from "../config.ts";
 import { sameCwd } from "../cwd.ts";
+import { snapshotMessageRelations } from "../extension-api.ts";
 import { EXACT_SEND_FEATURE, EXTENSION_BUS_FEATURE, MESSAGE_STATUS_FEATURE, PENDING_ASKS_FEATURE, SESSION_HELD_ERROR_CODE } from "../types.ts";
 import type { DeliveryState, SessionInfo, Message, BrokerMessage, ExtensionCapability, MessageControl, MessageReplyState, MessageReceipt, MessageReceiptStatus, MessageStatus, PendingAsk } from "../types.ts";
 import { ExtensionStateManager } from "./extension-state.ts";
@@ -106,6 +107,7 @@ interface DeliveryRecord {
   expectsReply: boolean;
   targetKey?: string;
   replyState: MessageReplyState;
+  relations?: MessageStatus["relations"];
   receiverReceipt?: MessageReceipt;
   createdAt: number;
   updatedAt: number;
@@ -877,6 +879,8 @@ class IntercomBroker {
               this.askEdges.delete(supersededEdgeKey);
               this.removePendingAskRecord(message.supersedes, fromSession.scopeId);
             }
+            const previous = this.deliveryRecords.get(this.deliveryRecordKey(currentKey, message.supersedes));
+            if (previous?.relations) previous.relations = snapshotMessageRelations({ ...previous.relations, supersededBy: message.id });
             this.updateDeliveryRecord(currentKey, message.supersedes, "failed", `Superseded by ${message.id}`, "E_DELIVERY_SUPERSEDED");
           }
           this.messageReceiptRoutes.set(scopedMessageKey(fromSession.scopeId, message.id), { from: currentKey, to: target.key, ...(message.expectsReply ? { expectsReply: true } : {}), createdAt: brokerReceivedAt });
@@ -1226,8 +1230,8 @@ class IntercomBroker {
     writeMessage(socket, { type: "delivery_failed", messageId, reason, delivery: "failed", code, retryable, outcomeKnown: true });
   }
 
-  private releaseReplyEdge(replyTo: string | undefined, scopeId: string | undefined): void {
-    if (!replyTo) return;
+  private releaseReplyEdge(replyTo: string | undefined, scopeId: string | undefined): boolean {
+    if (!replyTo) return false;
     const edgeKey = scopedMessageKey(scopeId, replyTo);
     const edge = this.askEdges.get(edgeKey);
     if (edge) {
@@ -1239,6 +1243,7 @@ class IntercomBroker {
     }
     this.askEdges.delete(edgeKey);
     this.removePendingAskRecord(replyTo, scopeId);
+    return edge !== undefined;
   }
 
   // A reply whose ask is gone (expired, cancelled, or already answered) still carries
@@ -1260,9 +1265,20 @@ class IntercomBroker {
     const key = this.deliveryRecordKey(fromKey, message.id);
     const demoted = message.lateReplyTo ? "late_reply" : undefined;
     this.recordDelivery(fromKey, message.id, fingerprint, target.acknowledgesReceipts ? "unknown" : "socket_delivered", undefined, undefined, target.acknowledgesReceipts === true, target.key, message.expectsReply === true);
-    if (demoted) this.deliveryRecords.get(key)!.demoted = demoted;
+    const record = this.deliveryRecords.get(key)!;
+    if (demoted) record.demoted = demoted;
+    record.relations = snapshotMessageRelations({
+      version: 1,
+      senderSessionId: this.sessions.get(fromKey)?.info.id,
+      recipientSessionId: target.info.id,
+      ...(message.supersedes ? { supersedes: message.supersedes } : {}),
+      ...(message.replyTo ? { replyTo: message.replyTo } : {}),
+      ...(message.lateReplyTo ? { lateReplyTo: message.lateReplyTo } : {}),
+      replyCorrelation: message.replyTo || message.lateReplyTo ? "unknown" : "none",
+    });
     if (!target.acknowledgesReceipts) {
-      this.releaseReplyEdge(message.replyTo, scopeId);
+      const matched = this.releaseReplyEdge(message.replyTo, scopeId);
+      if (record.relations) record.relations.replyCorrelation = demoted ? "late" : matched ? "matched" : record.relations.replyCorrelation;
       this.writeDeliverySuccess(senderSocket, message.id, "socket_delivered", demoted);
       return;
     }
@@ -1292,7 +1308,9 @@ class IntercomBroker {
       this.updateDeliveryRecord(pending.fromKey, pending.messageId, "socket_delivered");
     }
     // Release the answered ask only now, so a retry of an unconfirmed reply still matches it.
-    this.releaseReplyEdge(pending.replyTo, pending.scopeId);
+    const matched = this.releaseReplyEdge(pending.replyTo, pending.scopeId);
+    const record = this.deliveryRecords.get(key);
+    if (record?.relations && record.state === "socket_delivered") record.relations.replyCorrelation = pending.demoted ? "late" : matched ? "matched" : record.relations.replyCorrelation;
     if (pending.senderSocket.writable) this.writeDeliverySuccess(pending.senderSocket, pending.messageId, "socket_delivered", pending.demoted);
   }
 
@@ -1418,6 +1436,7 @@ class IntercomBroker {
         execution: "unknown",
         completion: "unknown",
         replyState: record.replyState,
+        ...(record.relations ? { relations: snapshotMessageRelations({ ...record.relations, ...(record.state === "unknown" ? { replyCorrelation: "unknown" } : {}) }) } : {}),
         ...(record.createdAt ? { createdAt: record.createdAt } : {}),
         ...(record.updatedAt ? { updatedAt: record.updatedAt } : {}),
         ...(record.code ? { code: record.code } : {}),

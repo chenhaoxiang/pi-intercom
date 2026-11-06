@@ -10,7 +10,7 @@ Direct 1:1 messaging between Pi sessions on the same machine. This repository is
 
 ## Releases and branch policy
 
-The current source candidate is **0.18.1-fork.8**, based on community **0.18.1**. Accepted cancel/same-peer supersede now retires and reads back only the exact locally tracked old follow-up; timer uncertainty stays separate from the main message result. The released **0.18.1-fork.7** remains the installation/rollback reference until the candidate is reviewed and published. Verify the matching immutable Release before installation. Fork releases use `<community-version>-fork.<revision>`; the fork revision increases without pretending to be a new upstream release.
+The current source candidate is **0.18.1-fork.9**, based on community **0.18.1**. Existing sender-scoped message status now exposes bounded broker-recorded replacement/reply relationships without treating a transport reply as business approval. The released **0.18.1-fork.8** remains the installation/rollback reference until the candidate is reviewed and published. Verify the matching immutable Release before installation. Fork releases use `<community-version>-fork.<revision>`; the fork revision increases without pretending to be a new upstream release.
 
 - `main`: our maintained integration and release branch, including fork fixes.
 - `upstream-main`: an exact mirror of the community's `main`, with no fork commits. Never install from this branch.
@@ -19,7 +19,7 @@ The current source candidate is **0.18.1-fork.8**, based on community **0.18.1**
 Install the matching reproducible release only after verifying its immutable Release exists (source candidacy is not publication):
 
 ```bash
-pi install git:github.com/chenhaoxiang/pi-intercom@v0.18.1-fork.8
+pi install git:github.com/chenhaoxiang/pi-intercom@v0.18.1-fork.9
 ```
 
 [GitHub Releases](https://github.com/chenhaoxiang/pi-intercom/releases) include the installable package tarball, a provenance manifest, and `SHA256SUMS`. These GitHub releases are not npm publications under the upstream author's namespace. See [release maintenance](docs/releasing.md) for asset installation and future releases.
@@ -159,6 +159,10 @@ intercom({
   escalateTo: "backup-owner",
 })
 ```
+
+For retained local socket deliveries, `status` with `messageId` also returns optional `details.relations` (version 1): `senderSessionId`, `recipientSessionId`, optional `supersedes` / `supersededBy` / `replyTo` / `lateReplyTo`, and `replyCorrelation` (`none`, `matched`, `late`, `unknown`). These are exact broker routing IDs, not necessarily native Pi session IDs. `matched` means the broker consumed that exact reply edge after its existing delivery check; `late` means the old edge was already closed and the content was retained as a normal message. Neither means the answer was applied or approved, and a late reply does not answer the replacement question.
+
+The projection includes no message/answer text or paths, rejects inconsistent/unsupported shapes and only exposes 1–128-character ASCII reference IDs (`A–Z`, `a–z`, digits, `.`, `_`, `:`, `-`, with no `..`). It does not change query ownership or add a query/event. Older brokers/extensions, missing records, mailbox-only routes and unsafe reference shapes leave relations unavailable/unknown; no history scan or inference fills the gap. Both the new broker and extension must be loaded for the structured tool projection. Never restart the shared broker just to activate this metadata.
 
 The independent CLI status query is also available:
 

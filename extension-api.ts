@@ -1,4 +1,23 @@
-import type { SessionInfo } from "./types.ts";
+import { types } from "node:util";
+import type { MessageRelationsV1, SessionInfo } from "./types.ts";
+
+/** Closed content-free projection; no getters, truncation, parsing of reason text or new query. */
+export function snapshotMessageRelations(value: unknown): MessageRelationsV1 | undefined {
+  if (!value || typeof value !== "object" || types.isProxy(value) || Object.getPrototypeOf(value) !== Object.prototype) return;
+  const allowed = ["version", "senderSessionId", "recipientSessionId", "supersedes", "supersededBy", "replyTo", "lateReplyTo", "replyCorrelation"];
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(descriptors);
+  if (keys.some(key => typeof key !== "string" || !allowed.includes(key) || !Object.hasOwn(descriptors[key], "value"))) return;
+  const field = (key: string) => descriptors[key]?.value;
+  const safeId = (id: unknown): id is string => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id) && !id.includes("..");
+  if (field("version") !== 1 || !safeId(field("senderSessionId")) || !safeId(field("recipientSessionId"))) return;
+  for (const key of ["supersedes", "supersededBy", "replyTo", "lateReplyTo"]) if (field(key) !== undefined && !safeId(field(key))) return;
+  const correlation = field("replyCorrelation");
+  if (!["none", "matched", "late", "unknown"].includes(correlation)) return;
+  if ((field("replyTo") && field("lateReplyTo")) || (correlation === "matched" && !field("replyTo")) ||
+    (correlation === "late" && !field("lateReplyTo")) || (correlation === "none" && (field("replyTo") || field("lateReplyTo")))) return;
+  return Object.fromEntries(keys.filter(key => field(key as string) !== undefined).map(key => [key, field(key as string)])) as unknown as MessageRelationsV1;
+}
 
 export const INTERCOM_EXTENSION_REGISTER_EVENT = "intercom:extension-register";
 export const INTERCOM_EXTENSION_REGISTRY_READY_EVENT = "intercom:extension-registry-ready";

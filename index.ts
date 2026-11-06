@@ -18,6 +18,7 @@ import {
   INTERCOM_OUTBOX_REQUEST_EVENT,
   INTERCOM_OUTBOX_RESULT_EVENT,
   INTERCOM_SESSION_IDENTITY_EVENT,
+  snapshotMessageRelations,
   type IntercomExtensionChannel,
   type IntercomExtensionEvent,
   type IntercomExtensionOwner,
@@ -429,6 +430,7 @@ function deliveryDetails(result: SendResult): Record<string, unknown> {
 }
 
 function messageStatusDetails(status: MessageStatus): Record<string, unknown> {
+  const relations = snapshotMessageRelations(status.relations);
   return {
     messageId: status.messageId,
     delivery: status.delivery,
@@ -438,6 +440,7 @@ function messageStatusDetails(status: MessageStatus): Record<string, unknown> {
     execution: "unknown",
     completion: "unknown",
     replyState: status.replyState,
+    ...(relations ? { relations } : {}),
     ...(status.receiverReceipt ? { receiverReceipt: status.receiverReceipt } : {}),
     ...(status.code ? { code: status.code } : {}),
     ...(status.reason ? { reason: status.reason } : {}),
@@ -449,7 +452,9 @@ function messageStatusDetails(status: MessageStatus): Record<string, unknown> {
 function formatMessageStatus(status: MessageStatus): string {
   const receipt = status.receiverReceipt?.status ?? "none";
   const state = status.delivery === "unknown" || !status.outcomeKnown ? "UNKNOWN" : status.delivery;
-  return `Message ${status.messageId}: transport=${state}; receiver receipt=${receipt}; reply=${status.replyState}; execution/completion=unknown`;
+  const relations = snapshotMessageRelations(status.relations);
+  const relationship = relations ? `; broker reply correlation=${relations.replyCorrelation}${relations.supersedes ? `; supersedes=${relations.supersedes}` : ""}${relations.supersededBy ? `; supersededBy=${relations.supersededBy}` : ""}${relations.replyTo ? `; replyTo=${relations.replyTo}` : ""}${relations.lateReplyTo ? `; lateReplyTo=${relations.lateReplyTo}` : ""} (transport only)` : "; broker relations=unknown";
+  return `Message ${status.messageId}: transport=${state}; receiver receipt=${receipt}; reply=${status.replyState}; execution/completion=unknown${relationship}`;
 }
 
 function toError(error: unknown): Error {

@@ -158,6 +158,18 @@ export interface MessageReceipt {
 
 export type MessageReplyState = "not_requested" | "pending" | "answered" | "expired" | "unknown";
 
+/** Exact retained broker relationships, not business answer validity or approval. */
+export interface MessageRelationsV1 {
+  version: 1;
+  senderSessionId: string;
+  recipientSessionId: string;
+  supersedes?: string;
+  supersededBy?: string;
+  replyTo?: string;
+  lateReplyTo?: string;
+  replyCorrelation: "none" | "matched" | "late" | "unknown";
+}
+
 /** Broker-observed transport state only. Execution and business completion are always unknown here. */
 export interface MessageStatus {
   messageId: string;
@@ -167,6 +179,8 @@ export interface MessageStatus {
   execution: "unknown";
   completion: "unknown";
   replyState: MessageReplyState;
+  /** Absent on older brokers, unretained records and unsupported routes. */
+  relations?: MessageRelationsV1;
   createdAt?: number;
   updatedAt?: number;
   code?: string;
