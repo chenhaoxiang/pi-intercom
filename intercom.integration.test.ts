@@ -1479,7 +1479,14 @@ for (const action of ["cancel", "supersede"] as const) {
       assert.equal(oldStatus.code, action === "cancel" ? "E_DELIVERY_CANCELLED" : "E_DELIVERY_SUPERSEDED");
       assert.equal(oldStatus.replyState, "expired");
       assert.equal(oldStatus.completion, "unknown");
-      assert.equal((await asker.getMessageStatus("current-question")).replyState, "pending");
+      assert.deepEqual(oldStatus.relations, { version: 1, senderSessionId: asker.sessionId, recipientSessionId: orchestrator.sessionId, replyCorrelation: "none", ...(action === "supersede" ? { supersededBy: "current-question" } : {}) });
+      const currentQuestion = await asker.getMessageStatus("current-question");
+      assert.equal(currentQuestion.replyState, "pending");
+      assert.equal(currentQuestion.relations?.supersedes, action === "supersede" ? "old-question" : undefined);
+      const lateStatus = await orchestrator.getMessageStatus("old-answer");
+      assert.deepEqual(lateStatus.relations, { version: 1, senderSessionId: orchestrator.sessionId, recipientSessionId: asker.sessionId, lateReplyTo: "old-question", replyCorrelation: "late" });
+      assert.equal(lateStatus.completion, "unknown");
+      assert.equal((await planner.getMessageStatus("old-question")).relations, undefined, "foreign receipt queries do not expose relationship metadata");
 
       const replay = await orchestrator.send(asker.sessionId!, lateReply);
       assert.equal(replay.demoted, "late_reply");
@@ -1494,6 +1501,8 @@ for (const action of ["cancel", "supersede"] as const) {
       assert.equal((await waitForReplyMessage(received, "current-answer")).content.text, partialText);
       const status = await asker.getMessageStatus("current-question");
       assert.equal(status.replyState, "answered", "answered means a transport reply, not full approval");
+      const matched = await orchestrator.getMessageStatus("current-answer");
+      assert.deepEqual(matched.relations, { version: 1, senderSessionId: orchestrator.sessionId, recipientSessionId: asker.sessionId, replyTo: "current-question", replyCorrelation: "matched" });
       assert.equal(status.execution, "unknown");
       assert.equal(status.completion, "unknown");
       assert.deepEqual(questions.map(message => message.id), ["old-question", "current-question"], "no original business request is replayed");
@@ -1503,6 +1512,46 @@ for (const action of ["cancel", "supersede"] as const) {
     }
   });
 }
+
+for (const action of ["cancel", "supersede"] as const) test(`late ACK after ${action} cannot consume another sender's reused ask id`, { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await withEnv("PI_INTERCOM_RECEIPT_TIMEOUT_MS", "4000", setupClients);
+  const raw = await connectRawRegistered("ack-original-owner", "ack-original-owner", { acknowledgesReceipts: true });
+  const { createMessageReader } = await import("./broker/framing.ts");
+  const packets: any[] = [], questions: Message[] = [];
+  raw.socket.on("data", createMessageReader(message => packets.push(message)));
+  orchestrator.on("message", (_from, message) => questions.push(message));
+  const query = async (messageId: string, requestId: string) => {
+    raw.writeMessage(raw.socket, { type: "message_status", version: 1, requestId, messageId });
+    await waitForCondition(() => packets.some(p => p.type === "message_status" && p.requestId === requestId), "raw status response");
+    return packets.find(p => p.type === "message_status" && p.requestId === requestId).status;
+  };
+  let reply: ReturnType<IntercomClient["send"]> | undefined;
+  try {
+    raw.writeMessage(raw.socket, { type: "send", to: orchestrator.sessionId, message: { id: "reused-question", timestamp: Date.now(), expectsReply: true, content: { text: "Original A question" } } });
+    await waitForCondition(() => questions.some(q => q.id === "reused-question"), "first ask delivered");
+    reply = orchestrator.send("ack-original-owner", { messageId: "reply-awaiting-ack", text: "Answer only to A's original question", replyTo: "reused-question" });
+    await waitForCondition(() => packets.some(p => p.type === "message" && p.message.id === "reply-awaiting-ack"), "reply delivered before ACK");
+    if (action === "cancel") raw.writeMessage(raw.socket, { type: "cancel_message", messageId: "reused-question" });
+    else raw.writeMessage(raw.socket, { type: "send", to: orchestrator.sessionId, message: { id: "replacement-question", timestamp: Date.now(), expectsReply: true, supersedes: "reused-question", content: { text: "A replacement question" } } });
+    assert.equal((await query("reused-question", "retired")).code, action === "cancel" ? "E_DELIVERY_CANCELLED" : "E_DELIVERY_SUPERSEDED");
+    assert.equal((await planner.send(orchestrator.sessionId!, { messageId: "reused-question", expectsReply: true, text: "Different sender C question" })).delivered, true);
+    raw.writeMessage(raw.socket, { type: "message_receipt", receipt: { messageId: "reply-awaiting-ack", status: "receiver_received", timestamp: Date.now() } });
+    assert.equal((await reply).delivered, true);
+    const status = await orchestrator.getMessageStatus("reply-awaiting-ack");
+    assert.equal(status.relations?.replyCorrelation, "unknown", "ACK proves receipt, not that the current ask edge is the original");
+    assert.equal(status.relations?.replyTo, "reused-question");
+    assert.equal((await planner.getMessageStatus("reused-question")).replyState, "pending");
+    assert.ok((await planner.listPendingAsks()).some(q => q.messageId === "reused-question"));
+    const message = packets.find(p => p.type === "message" && p.message.id === "reply-awaiting-ack").message;
+    assert.equal(message.content.text, "Answer only to A's original question");
+    assert.equal(message.replyTo, "reused-question");
+    if (action === "supersede") assert.equal((await query("replacement-question", "replacement-status")).replyState, "pending");
+  } finally {
+    raw.socket.destroy();
+    await reply?.catch(() => undefined);
+    await cleanup();
+  }
+});
 
 test("broker rejected supersedes preserve the original pending ask", { concurrency: false }, async () => {
   const { planner, orchestrator, cleanup } = await setupClients();
@@ -3216,6 +3265,31 @@ test("independent message status query reports receipt without claiming executio
   }
 });
 
+test("public status tool exposes broker relations but leaves old-broker absence unknown", { concurrency: false }, async (t) => {
+  const { planner, cleanup } = await setupClients();
+  const { default: register } = await import("./index.ts");
+  const harness = createExtensionHarness("relations-tool-sender", { hasUI: true, isIdle: () => true });
+  try {
+    register(harness.pi as never);
+    await harness.emitLifecycle("session_start");
+    const sender = await waitForSessionByName(planner, "relations-tool-sender");
+    const tool = harness.tools.find(tool => tool.name === "intercom")!;
+    const sent = await tool.execute("relations-send", { action: "send", to: planner.sessionId, message: "Synthetic metadata-only notice" }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(sent.details?.delivered, true);
+    const status = await tool.execute("relations-status", { action: "status", messageId: sent.details?.messageId }, new AbortController().signal, undefined, harness.ctx);
+    assert.deepEqual(status.details?.relations, { version: 1, senderSessionId: sender.id, recipientSessionId: planner.sessionId, replyCorrelation: "none" });
+    assert.equal(status.details?.execution, "unknown");
+    assert.match(status.content[0]?.text ?? "", /broker reply correlation=none/);
+    t.mock.method(IntercomClient.prototype, "getMessageStatus", async () => ({ messageId: "legacy", delivery: "unknown", outcomeKnown: false, retryable: false, execution: "unknown", completion: "unknown", replyState: "unknown" }));
+    const legacy = await tool.execute("relations-legacy", { action: "status", messageId: "legacy" }, new AbortController().signal, undefined, harness.ctx);
+    assert.equal(legacy.details?.relations, undefined);
+    assert.match(legacy.content[0]?.text ?? "", /broker relations=unknown/);
+  } finally {
+    await harness.emitLifecycle("session_shutdown");
+    await cleanup();
+  }
+});
+
 test("receiver receipt timeout remains UNKNOWN and is independently queryable", { concurrency: false }, async () => {
   const { planner, cleanup } = await withEnv("PI_INTERCOM_RECEIPT_TIMEOUT_MS", "80", setupClients);
   const silent = await connectRawRegistered("status-silent-receiver", "status-silent-receiver", { acknowledgesReceipts: true });
@@ -3228,6 +3302,7 @@ test("receiver receipt timeout remains UNKNOWN and is independently queryable", 
     assert.equal(status.delivery, "unknown");
     assert.equal(status.outcomeKnown, false);
     assert.equal(status.code, "E_RECEIPT_TIMEOUT");
+    assert.equal(status.relations?.replyCorrelation, "unknown", "unconfirmed delivery cannot strengthen correlation");
     assert.equal(status.execution, "unknown");
     assert.equal(status.completion, "unknown");
   } finally {
