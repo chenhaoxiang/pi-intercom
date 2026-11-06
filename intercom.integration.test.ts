@@ -1513,6 +1513,46 @@ for (const action of ["cancel", "supersede"] as const) {
   });
 }
 
+for (const action of ["cancel", "supersede"] as const) test(`late ACK after ${action} cannot consume another sender's reused ask id`, { concurrency: false }, async () => {
+  const { planner, orchestrator, cleanup } = await withEnv("PI_INTERCOM_RECEIPT_TIMEOUT_MS", "4000", setupClients);
+  const raw = await connectRawRegistered("ack-original-owner", "ack-original-owner", { acknowledgesReceipts: true });
+  const { createMessageReader } = await import("./broker/framing.ts");
+  const packets: any[] = [], questions: Message[] = [];
+  raw.socket.on("data", createMessageReader(message => packets.push(message)));
+  orchestrator.on("message", (_from, message) => questions.push(message));
+  const query = async (messageId: string, requestId: string) => {
+    raw.writeMessage(raw.socket, { type: "message_status", version: 1, requestId, messageId });
+    await waitForCondition(() => packets.some(p => p.type === "message_status" && p.requestId === requestId), "raw status response");
+    return packets.find(p => p.type === "message_status" && p.requestId === requestId).status;
+  };
+  let reply: ReturnType<IntercomClient["send"]> | undefined;
+  try {
+    raw.writeMessage(raw.socket, { type: "send", to: orchestrator.sessionId, message: { id: "reused-question", timestamp: Date.now(), expectsReply: true, content: { text: "Original A question" } } });
+    await waitForCondition(() => questions.some(q => q.id === "reused-question"), "first ask delivered");
+    reply = orchestrator.send("ack-original-owner", { messageId: "reply-awaiting-ack", text: "Answer only to A's original question", replyTo: "reused-question" });
+    await waitForCondition(() => packets.some(p => p.type === "message" && p.message.id === "reply-awaiting-ack"), "reply delivered before ACK");
+    if (action === "cancel") raw.writeMessage(raw.socket, { type: "cancel_message", messageId: "reused-question" });
+    else raw.writeMessage(raw.socket, { type: "send", to: orchestrator.sessionId, message: { id: "replacement-question", timestamp: Date.now(), expectsReply: true, supersedes: "reused-question", content: { text: "A replacement question" } } });
+    assert.equal((await query("reused-question", "retired")).code, action === "cancel" ? "E_DELIVERY_CANCELLED" : "E_DELIVERY_SUPERSEDED");
+    assert.equal((await planner.send(orchestrator.sessionId!, { messageId: "reused-question", expectsReply: true, text: "Different sender C question" })).delivered, true);
+    raw.writeMessage(raw.socket, { type: "message_receipt", receipt: { messageId: "reply-awaiting-ack", status: "receiver_received", timestamp: Date.now() } });
+    assert.equal((await reply).delivered, true);
+    const status = await orchestrator.getMessageStatus("reply-awaiting-ack");
+    assert.equal(status.relations?.replyCorrelation, "unknown", "ACK proves receipt, not that the current ask edge is the original");
+    assert.equal(status.relations?.replyTo, "reused-question");
+    assert.equal((await planner.getMessageStatus("reused-question")).replyState, "pending");
+    assert.ok((await planner.listPendingAsks()).some(q => q.messageId === "reused-question"));
+    const message = packets.find(p => p.type === "message" && p.message.id === "reply-awaiting-ack").message;
+    assert.equal(message.content.text, "Answer only to A's original question");
+    assert.equal(message.replyTo, "reused-question");
+    if (action === "supersede") assert.equal((await query("replacement-question", "replacement-status")).replyState, "pending");
+  } finally {
+    raw.socket.destroy();
+    await reply?.catch(() => undefined);
+    await cleanup();
+  }
+});
+
 test("broker rejected supersedes preserve the original pending ask", { concurrency: false }, async () => {
   const { planner, orchestrator, cleanup } = await setupClients();
   const outsider = new IntercomClient();

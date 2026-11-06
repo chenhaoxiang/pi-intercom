@@ -93,6 +93,8 @@ interface PendingReceipt {
   targetSocket: net.Socket;
   scopeId?: string;
   replyTo?: string;
+  /** Exact edge validated for this delivery; a later ask may reuse the same id. */
+  replyEdge?: { edge: AskEdge; from: string; to: string };
   demoted?: "late_reply";
   timer: NodeJS.Timeout;
 }
@@ -1230,10 +1232,11 @@ class IntercomBroker {
     writeMessage(socket, { type: "delivery_failed", messageId, reason, delivery: "failed", code, retryable, outcomeKnown: true });
   }
 
-  private releaseReplyEdge(replyTo: string | undefined, scopeId: string | undefined): boolean {
+  private releaseReplyEdge(replyTo: string | undefined, scopeId: string | undefined, expected?: { edge: AskEdge; from: string; to: string }): boolean {
     if (!replyTo) return false;
     const edgeKey = scopedMessageKey(scopeId, replyTo);
     const edge = this.askEdges.get(edgeKey);
+    if (expected && (edge !== expected.edge || edge.from !== expected.from || edge.to !== expected.to)) return false;
     if (edge) {
       const record = this.deliveryRecords.get(this.deliveryRecordKey(edge.from, replyTo));
       if (record) {
@@ -1264,6 +1267,8 @@ class IntercomBroker {
   private completeSocketDelivery(senderSocket: net.Socket, fromKey: string, scopeId: string | undefined, target: ConnectedSession, message: Message, fingerprint: string): void {
     const key = this.deliveryRecordKey(fromKey, message.id);
     const demoted = message.lateReplyTo ? "late_reply" : undefined;
+    const edge = message.replyTo ? this.askEdges.get(scopedMessageKey(scopeId, message.replyTo)) : undefined;
+    const replyEdge = edge ? { edge, from: edge.from, to: edge.to } : undefined;
     this.recordDelivery(fromKey, message.id, fingerprint, target.acknowledgesReceipts ? "unknown" : "socket_delivered", undefined, undefined, target.acknowledgesReceipts === true, target.key, message.expectsReply === true);
     const record = this.deliveryRecords.get(key)!;
     if (demoted) record.demoted = demoted;
@@ -1277,7 +1282,7 @@ class IntercomBroker {
       replyCorrelation: message.replyTo || message.lateReplyTo ? "unknown" : "none",
     });
     if (!target.acknowledgesReceipts) {
-      const matched = this.releaseReplyEdge(message.replyTo, scopeId);
+      const matched = replyEdge ? this.releaseReplyEdge(message.replyTo, scopeId, replyEdge) : false;
       if (record.relations) record.relations.replyCorrelation = demoted ? "late" : matched ? "matched" : record.relations.replyCorrelation;
       this.writeDeliverySuccess(senderSocket, message.id, "socket_delivered", demoted);
       return;
@@ -1293,6 +1298,7 @@ class IntercomBroker {
       targetSocket: target.socket,
       ...(scopeId ? { scopeId } : {}),
       ...(message.replyTo ? { replyTo: message.replyTo } : {}),
+      ...(replyEdge ? { replyEdge } : {}),
       ...(demoted ? { demoted } : {}),
       timer,
     });
@@ -1308,7 +1314,7 @@ class IntercomBroker {
       this.updateDeliveryRecord(pending.fromKey, pending.messageId, "socket_delivered");
     }
     // Release the answered ask only now, so a retry of an unconfirmed reply still matches it.
-    const matched = this.releaseReplyEdge(pending.replyTo, pending.scopeId);
+    const matched = pending.replyEdge ? this.releaseReplyEdge(pending.replyTo, pending.scopeId, pending.replyEdge) : false;
     const record = this.deliveryRecords.get(key);
     if (record?.relations && record.state === "socket_delivered") record.relations.replyCorrelation = pending.demoted ? "late" : matched ? "matched" : record.relations.replyCorrelation;
     if (pending.senderSocket.writable) this.writeDeliverySuccess(pending.senderSocket, pending.messageId, "socket_delivered", pending.demoted);
