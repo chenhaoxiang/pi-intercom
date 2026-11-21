@@ -1109,6 +1109,12 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       && pending.binding.ownerSessionId === currentSessionId
       && pending.binding.intercomSessionId === (currentIntercomSessionId ?? currentSessionId);
   }
+  function followupBindingsMatch(left: PendingFollowup["binding"], right: FollowupDueRequest["binding"]): boolean {
+    return left.messageId === right.messageId
+      && left.peerSessionId === right.peerSessionId
+      && left.ownerSessionId === right.ownerSessionId
+      && left.intercomSessionId === right.intercomSessionId;
+  }
   function uncheckedFollowup(reason: string): FollowupResult {
     return { ok: false, state: "unknown", reason: `${reason}; timer state is unchecked. Do not replay the original business request.`, completion: "unknown" };
   }
@@ -2771,10 +2777,10 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
     const generation = runtimeGeneration;
     const activeClient = client;
     const pending = pendingFollowups.get(request.binding.messageId);
-    const retired = () => pending?.binding.ownerSessionId === request.binding.ownerSessionId
-      && pending.binding.intercomSessionId === request.binding.intercomSessionId
-      && pending.binding.peerSessionId === request.binding.peerSessionId && pending.cancelled;
-    const isCurrent = () => generation === runtimeGeneration && client === activeClient && !retired() && request.isCurrent();
+    const retired = () => pending !== undefined && followupBindingsMatch(pending.binding, request.binding) && pending.cancelled;
+    const isCurrent = () => generation === runtimeGeneration && client === activeClient
+      && pending !== undefined && followupBindingsMatch(pending.binding, request.binding)
+      && followupRuntimeIsCurrent(pending) && !retired() && request.isCurrent();
     void (async () => {
       if (!activeClient?.isConnected() || !isCurrent()) {
         request.respond({ delivered: false, unknown: true, reason: "Follow-up was cancelled, expired, or Intercom is disconnected before send" });
