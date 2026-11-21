@@ -6264,6 +6264,111 @@ test("follow-up retirement: an in-flight due cannot cross a session runtime swit
   });
 });
 
+test("follow-up due after runtime replacement does not adopt a stale local binding", { concurrency: false }, async t => {
+  await withRetirementHarness(async ({ harness, planner, questions, execute }) => {
+    const { requests } = followupResponder(harness);
+    const old = await execute({ action: "ask", to: planner.sessionId, message: "Old", timeoutMs: 50, followUp: boundedFollowup() });
+    const oldId = old.details?.messageId as string;
+    const oldRequest = requests.find(request => request.action === "create" && request.binding.messageId === oldId)!;
+
+    await harness.emitLifecycle("session_start");
+    await waitForSessionByName(planner, "retirement-fixture");
+    const send = t.mock.method(IntercomClient.prototype, "send");
+    const status = t.mock.method(IntercomClient.prototype, "getMessageStatus");
+
+    let dueResult: unknown;
+    harness.pi.events.emit(FOLLOWUP_DUE_EVENT, {
+      version: 1,
+      binding: oldRequest.binding,
+      record: { ...oldRequest.binding, ...oldRequest.options },
+      jobId: "stale-runtime-due",
+      claimId: "stale-runtime-claim",
+      claim() {},
+      isCurrent: () => true,
+      respond: (result: unknown) => { dueResult = result; },
+    } satisfies FollowupDueRequest);
+    await waitForCondition(() => dueResult !== undefined, "stale runtime due settles");
+
+    assert.deepEqual(dueResult, {
+      delivered: false,
+      unknown: true,
+      reason: "Follow-up was cancelled, expired, or Intercom is disconnected before send",
+    });
+    assert.deepEqual(requests.map(request => request.action), ["create"], "stale due must not query or mutate Schedule");
+    assert.deepEqual(questions.map(message => message.id), [oldId], "stale due must not send a reminder after runtime replacement");
+    assert.equal(status.mock.callCount(), 0, "stale due must not query transport status");
+    assert.equal(send.mock.callCount(), 0, "stale due must not send a reminder");
+  });
+});
+
+test("follow-up due with a wrong peer binding settles before transport", { concurrency: false }, async t => {
+  await withRetirementHarness(async ({ harness, planner, orchestrator, questions, execute }) => {
+    const { requests } = followupResponder(harness);
+    const old = await execute({ action: "ask", to: planner.sessionId, message: "Old", timeoutMs: 50, followUp: boundedFollowup() });
+    const oldId = old.details?.messageId as string;
+    const oldRequest = requests.find(request => request.action === "create" && request.binding.messageId === oldId)!;
+    const send = t.mock.method(IntercomClient.prototype, "send");
+    const status = t.mock.method(IntercomClient.prototype, "getMessageStatus");
+
+    let dueResult: unknown;
+    harness.pi.events.emit(FOLLOWUP_DUE_EVENT, {
+      version: 1,
+      binding: { ...oldRequest.binding, peerSessionId: orchestrator.sessionId! },
+      record: { ...oldRequest.binding, ...oldRequest.options },
+      jobId: "wrong-peer-due",
+      claimId: "wrong-peer-claim",
+      claim() {},
+      isCurrent: () => true,
+      respond: (result: unknown) => { dueResult = result; },
+    } satisfies FollowupDueRequest);
+    await waitForCondition(() => dueResult !== undefined, "wrong-peer due settles");
+
+    assert.deepEqual(dueResult, {
+      delivered: false,
+      unknown: true,
+      reason: "Follow-up was cancelled, expired, or Intercom is disconnected before send",
+    });
+    assert.deepEqual(questions.map(message => message.id), [oldId], "wrong-peer due must not send a reminder");
+    assert.equal(status.mock.callCount(), 0, "wrong-peer due must not query transport status");
+    assert.equal(send.mock.callCount(), 0, "wrong-peer due must not send a reminder");
+  });
+});
+
+test("cancelled follow-up due settles before transport", { concurrency: false }, async t => {
+  await withRetirementHarness(async ({ harness, planner, questions, execute }) => {
+    const { requests } = followupResponder(harness);
+    const old = await execute({ action: "ask", to: planner.sessionId, message: "Old", timeoutMs: 50, followUp: boundedFollowup() });
+    const oldId = old.details?.messageId as string;
+    const oldRequest = requests.find(request => request.action === "create" && request.binding.messageId === oldId)!;
+    const send = t.mock.method(IntercomClient.prototype, "send");
+    const status = t.mock.method(IntercomClient.prototype, "getMessageStatus");
+    const cancelled = await execute({ action: "cancel", messageId: oldId });
+    assert.equal(cancelled.details?.delivered, true);
+
+    let dueResult: unknown;
+    harness.pi.events.emit(FOLLOWUP_DUE_EVENT, {
+      version: 1,
+      binding: oldRequest.binding,
+      record: { ...oldRequest.binding, ...oldRequest.options },
+      jobId: "cancelled-due",
+      claimId: "cancelled-claim",
+      claim() {},
+      isCurrent: () => true,
+      respond: (result: unknown) => { dueResult = result; },
+    } satisfies FollowupDueRequest);
+    await waitForCondition(() => dueResult !== undefined, "cancelled due settles");
+
+    assert.deepEqual(dueResult, {
+      delivered: false,
+      unknown: true,
+      reason: "Follow-up was cancelled, expired, or Intercom is disconnected before send",
+    });
+    assert.deepEqual(questions.map(message => message.id), [oldId], "cancelled due must not send a reminder");
+    assert.equal(status.mock.callCount(), 0, "cancelled due must not query transport status");
+    assert.equal(send.mock.callCount(), 0, "cancelled due must not send a reminder");
+  });
+});
+
 test("fixed Schedule retirement boundary: store lock failure retains the old retirement marker beyond 60 seconds", { concurrency: false, skip: !scheduleSource }, async t => {
   const { register, CronStorage, CronScheduler } = await fixedScheduleModules();
   const cwd = mkdtempSync(path.join(tmpdir(), "ic-store-"));
