@@ -58,7 +58,7 @@ intercom({ action: "status" })
 
 `send` is fire-and-forget. `ask` requires a currently connected target and waits for a reply, returning that reply as the tool result. A disconnected target fails immediately instead of leaving a blocking request queued.
 
-Intercom rejects malformed parameter combinations before connecting or sending. If it returns JSON `code: "E_INTERCOM_INVALID_PARAMETERS"` with `state: "NOT_SENT"`, apply the listed correction once without changing the intended action. Omit unused fields; `replyTo` must be an exact inbound ask message ID, and strings such as `"unused"` or `":omit"` are not omission.
+Intercom rejects malformed parameter combinations before connecting or sending. If it returns JSON `code: "E_INTERCOM_INVALID_PARAMETERS"` with `state: "NOT_SENT"`, apply the listed correction once without changing the intended action. Omit unused fields; `replyTo` must be an exact inbound ask message ID. The model-call boundary removes omission tokens from unrelated read-only fields and non-sensitive optional fields before validation, but routing IDs (`replyTo`, `messageId`, `supersedes`, `retryOf`, and `escalateTo`) remain fail-closed; direct/codemode callers must omit fields themselves. Strings such as `"unused"` or `":omit"` are never valid IDs.
 
 For a handoff, use the overlay's `h` key or:
 

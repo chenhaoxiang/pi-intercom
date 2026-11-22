@@ -120,6 +120,60 @@ const INTERCOM_ACTION_FIELDS: Record<string, readonly string[]> = {
   reply: ["to", "message", "attachments", "replyTo"],
 };
 const INTERCOM_ID_FIELDS = ["replyTo", "messageId", "supersedes", "retryOf", "escalateTo"] as const;
+const INTERCOM_SENSITIVE_FIELDS = new Set<string>(INTERCOM_ID_FIELDS);
+const INTERCOM_OMISSION_TOKEN = /^(?:unused|:omit|omit|undefined|null)$/i;
+const INTERCOM_READ_ONLY_ACTIONS = new Set(["list", "list-cwd", "pending", "status"]);
+
+function isOmissionToken(value: unknown): boolean {
+  return value === undefined || value === null || (
+    typeof value === "string" && (!value.trim() || INTERCOM_OMISSION_TOKEN.test(value.trim()))
+  );
+}
+
+/**
+ * Repair only the ambiguity introduced by provider/model argument generation.
+ *
+ * The model-facing tool is intentionally kept backwards-compatible as one
+ * action-dispatched tool, but some providers emit every optional property and
+ * use strings such as "unused" to mean omission. That representation is not
+ * safe for routing IDs, so IDs that are meaningful for the selected action
+ * remain fail-closed in preflight. Omission tokens in unsupported or
+ * non-sensitive optional fields can be dropped before TypeBox validation;
+ * read-only actions may also discard unrelated extras because they have no
+ * side effects.
+ */
+function prepareIntercomToolArguments(input: unknown): Record<string, unknown> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return input as Record<string, unknown>;
+
+  const params: Record<string, unknown> = { ...(input as Record<string, unknown>) };
+  const action = typeof params.action === "string" ? params.action : "";
+  const allowedFields = INTERCOM_ACTION_FIELDS[action];
+  if (!allowedFields) return params;
+
+  for (const field of Object.keys(params)) {
+    if (field === "action") continue;
+    const value = params[field];
+    if (!allowedFields.includes(field)) {
+      // Read-only actions have an unambiguous intent, so provider-added extras
+      // can be dropped before validation. Side-effecting actions retain real
+      // unsupported values for action-aware fail-closed diagnostics; omission
+      // tokens are safe to remove in either case.
+      if (INTERCOM_READ_ONLY_ACTIONS.has(action) || isOmissionToken(value)) delete params[field];
+      continue;
+    }
+    if (field === "followUp" && value && typeof value === "object" && !Array.isArray(value)) {
+      const followUp = { ...(value as Record<string, unknown>) };
+      for (const nestedField of ["afterMs", "expiresAt", "goal", "phase", "coveredBy"]) {
+        if (isOmissionToken(followUp[nestedField])) delete followUp[nestedField];
+      }
+      params[field] = followUp;
+      continue;
+    }
+    if (!INTERCOM_SENSITIVE_FIELDS.has(field) && isOmissionToken(value)) delete params[field];
+  }
+
+  return params;
+}
 
 function parameterError(action: string, field: string, reason: string, unsupportedField = false): IntercomToolResult {
   const corrections = unsupportedField
@@ -3264,6 +3318,11 @@ Usage:
   intercom({ action: "status", messageId: "..." }) → Query retained transport receipt; execution stays UNKNOWN`,
     promptSnippet:
       "Use to coordinate with other local pi sessions: list peers, send updates, ask for help, or check intercom connectivity.",
+    promptGuidelines: [
+      "Construct the smallest object for the selected action. list-cwd accepts only action and optional cwd; status/list/pending do not need to/from/message.",
+      "Omit unused fields completely. Never encode omission as unused, :omit, omit, undefined, null, an empty string, or a fabricated ID/timestamp. Reply and status IDs must be real values.",
+      "If a call returns E_INTERCOM_INVALID_PARAMETERS with NOT_SENT, change the JSON arguments before one correction; do not repeat the same object or change the intended action.",
+    ],
 
     parameters: Type.Object({
       action: StringEnum(["list", "list-cwd", "send", "ask", "handover", "reply", "pending", "status", "cancel"] as const, {
@@ -3330,6 +3389,7 @@ Usage:
       })),
     }),
     constrainedSampling: { type: "json_schema", strict: "prefer" },
+    prepareArguments: prepareIntercomToolArguments,
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const rawParams = params as unknown as Record<string, unknown>;
