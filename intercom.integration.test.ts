@@ -3468,6 +3468,65 @@ test("strict optional nulls preserve minimal send semantics and never turn strin
   }
 });
 
+test("prepareArguments repairs provider omission tokens without weakening routing-ID safety", { concurrency: false }, async () => {
+  const { default: piIntercomExtension } = await import("./index.ts");
+  const harness = createExtensionHarness("prepare-arguments");
+  piIntercomExtension(harness.pi as never);
+  const tool = harness.tools.find((candidate) => candidate.name === "intercom")!;
+  const prepare = (tool as unknown as { prepareArguments?: (args: unknown) => Record<string, unknown> }).prepareArguments;
+  assert.ok(prepare, "intercom must expose the host argument preparation hook");
+
+  const preparedList = prepare!({
+    action: "list-cwd",
+    to: "unused",
+    message: "unused",
+    replyTo: "unused",
+    messageId: "unused",
+    cwd: "unused",
+  });
+  assert.deepEqual(preparedList, { action: "list-cwd" });
+  const validatedList = validateToolArguments(tool as never, {
+    id: "prepared-list", name: "intercom", arguments: preparedList,
+  });
+  assert.deepEqual(validatedList, { action: "list-cwd" });
+
+  const preparedSend = prepare!({
+    action: "send",
+    to: "peer",
+    message: "notice",
+    wake: "unused",
+    attachments: [],
+    replyTo: "unused",
+  });
+  assert.equal(preparedSend.wake, undefined);
+  assert.deepEqual(preparedSend.attachments, []);
+  assert.equal(preparedSend.replyTo, "unused", "routing IDs must remain fail-closed");
+  const validatedSend = validateToolArguments(tool as never, {
+    id: "prepared-send", name: "intercom", arguments: preparedSend,
+  });
+  assert.equal(validatedSend.replyTo, "unused");
+
+  const preparedAsk = prepare!({
+    action: "ask",
+    to: "peer",
+    message: "question",
+    followUp: { afterMs: "unused", expiresAt: "unused", goal: "unused", phase: "unused" },
+  });
+  assert.deepEqual(preparedAsk.followUp, {});
+  const validatedAsk = validateToolArguments(tool as never, {
+    id: "prepared-ask", name: "intercom", arguments: preparedAsk,
+  });
+  assert.deepEqual(validatedAsk.followUp, {});
+
+  const readOnlyExtra = prepare!({ action: "list-cwd", to: "real-target" });
+  assert.deepEqual(readOnlyExtra, { action: "list-cwd" }, "read-only actions can discard unrelated extras without changing intent");
+
+  const realReplyId = prepare!({ action: "send", to: "peer", message: "notice", replyTo: "real-message-id" });
+  assert.equal(realReplyId.replyTo, "real-message-id");
+  const sideEffectingExtra = prepare!({ action: "send", to: "peer", message: "notice", messageId: "real-message-id" });
+  assert.equal(sideEffectingExtra.messageId, "real-message-id", "side-effecting actions retain real unsupported values for fail-closed validation");
+});
+
 test("unresolved reply IDs return correction JSON only before any send attempt", { concurrency: false }, async () => {
   const { cleanup } = await setupClients();
   const { default: piIntercomExtension } = await import("./index.ts");

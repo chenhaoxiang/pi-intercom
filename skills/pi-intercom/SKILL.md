@@ -30,7 +30,7 @@ intercom({ action: "reply", replyTo: "exact-inbound-ask-id", message: "Retain it
 
 ## Keep parameters minimal and recover honestly
 
-- Pass only fields supported by the action. Omit unused optional fields; JSON `null` may normalize to omission, but strings `"unused"`, `":omit"`, `"undefined"` and `"null"` are real values. Never invent IDs or timestamps.
+- Pass only fields supported by the action. Omit unused optional fields; the model-call boundary may remove omission tokens from unrelated read-only fields and non-sensitive optional fields before validation. Routing IDs (`replyTo`, `messageId`, `supersedes`, `retryOf`, and `escalateTo`) remain fail-closed; JSON `null` may normalize to omission, but strings `"unused"`, `":omit"`, `"undefined"` and `"null"` are never valid IDs. Direct/codemode callers must omit fields themselves and never invent IDs or timestamps.
 - `E_INTERCOM_INVALID_PARAMETERS` with `state:"NOT_SENT"` means follow `corrections` once, preserving the business intent. `parameterWarnings` means optional parameters were normalized, not that delivery succeeded. Do not resend merely to remove a warning; use `delivered`, `delivery` and `state` to determine the outcome.
 - After a message ID exists, timeout, cancellation or missing transport evidence remains `UNKNOWN`. Use `status` with that exact `messageId`; never blindly replay the original message.
 - `ask.escalateTo` and `followUp` are opt-in bounded status notifications, not default delegation fields. A follow-up needs finite `afterMs` (1000–86400000) and an expiry later than its reminder. Do not fabricate these controls for normal calls.
