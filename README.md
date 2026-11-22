@@ -48,7 +48,24 @@ Name the current session so peers can address it reliably:
 
 Open the picker with **Alt+M** or `/intercom`, or use the tool directly:
 
-```ts
+## Quick Start
+
+### From the Keyboard
+
+Press **Alt+M** or type `/intercom` to open the session list overlay:
+
+1. **Select a session** — Use arrow keys to pick a target session
+2. **Compose message** — Write your message in the compose overlay
+3. **Send** — Press Enter to send, Escape to cancel
+
+Press **h** on a highlighted session to hand this session over to it instead (see [Workflow: Handing Over a Session](#workflow-handing-over-a-session)).
+
+### From the Agent
+
+The agent can list sessions and send messages using the `intercom` tool. Tool calls and results render as compact transcript rows so send/ask/reply flows are easy to scan. A recipient addressed by ID shows by its session name. Use `/intercom-id` to insert a handoff snippet for the current session's stable intercom target into the editor. For common patterns like planner-worker delegation, the bundled `pi-intercom` skill provides copy-paste ready examples:
+
+```typescript
+// List active sessions
 intercom({ action: "list" })
 intercom({ action: "send", to: "worker", message: "Please check the parser edge cases.", wake: true })
 intercom({ action: "ask", to: "planner", message: "Which compatibility behavior should I preserve?" })
