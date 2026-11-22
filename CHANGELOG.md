@@ -4,6 +4,12 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.18.1-fork.10] - 2026-11-22
+
+### Fixed
+- Bind scheduled follow-up due handling to the exact message, peer, owner and Intercom runtime so stale, cancelled or mismatched due events settle as unknown before querying or sending.
+- Add provider-free integration coverage for runtime replacement, wrong-peer bindings and cancelled follow-up due events.
+
 ## [0.18.1-fork.9] - 2026-11-06
 
 - Expose retained broker replacement/reply relationships through the existing sender-scoped message-status result. Late replies retain their original reference and cannot answer a replacement ask.
