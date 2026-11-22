@@ -4,6 +4,12 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.18.1-fork.11] - 2026-11-22
+
+### Fixed
+- Normalize provider-generated omission tokens and unrelated read-only action fields at the model-call boundary before Schema validation, while keeping routing IDs and side-effecting real extras fail-closed.
+- Add model-facing minimal-parameter guidelines and regression coverage for `list-cwd`, nullable optional fields, malformed follow-up controls and sensitive routing IDs.
+
 ## [0.18.1-fork.10] - 2026-11-22
 
 ### Fixed
