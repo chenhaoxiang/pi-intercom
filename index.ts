@@ -48,6 +48,7 @@ import { listMachineAgents, listSavedMachines, parseCrossMachineTarget } from ".
 import { formatHandoverMessage, generateHandoverBody, readGitState } from "./handover.ts";
 import { LOADED_INTERCOM_VERSION, runtimeLabel, selectedLocalRuntimeVersion, createRuntimeAdvisories, createPeerUpgradeAdvisories, createPeerVersionObservations } from "./runtime-version.ts";
 import { isIdleWakePending, releaseIdleWake, reserveIdleWake, supportsNativeCustomTurns } from "./idle-wake.ts";
+import { attachmentFreshnessTag, pinFileAttachments } from "./attachment-freshness.ts";
 import { FOLLOWUP_CANCEL_TRANSPORT_EVENT, FOLLOWUP_DUE_EVENT, FOLLOWUP_OBSERVED_EVENT, requestFollowup, followupStatusText, type FollowupCancelTransportRequest, type FollowupDueRequest, type FollowupOptions, type FollowupObservation, type FollowupResult } from "./followup-api.ts";
 
 const INTERCOM_TOOL_NAME = "intercom";
@@ -538,9 +539,9 @@ function formatAttachments(attachments: Attachment[]): string {
   let text = "";
   for (const att of attachments) {
     if (att.language) {
-      text += `\n\n---\nAttachment: ${att.name}\n~~~${att.language}\n${att.content}\n~~~`;
+      text += `\n\n---\nAttachment: ${att.name}${attachmentFreshnessTag(att)}\n~~~${att.language}\n${att.content}\n~~~`;
     } else {
-      text += `\n\n---\nAttachment: ${att.name}\n${att.content}`;
+      text += `\n\n---\nAttachment: ${att.name}${attachmentFreshnessTag(att)}\n${att.content}`;
     }
   }
   return text;
@@ -2527,6 +2528,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         }
       }
       const resolvedTo = boundReply?.from.id ?? to;
+      const pinnedAttachments = pinFileAttachments(attachments);
       const target: DeliveryTarget = cwd
         ? await resolveCwdDeliveryTarget(connectedClient, { to: resolvedTo, cwd, openProjectPaneIfMissing, focus, signal })
         : boundReply
@@ -2575,7 +2577,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
         effectiveReplyTo = replyTo ?? inferredAsk?.message.id;
         return connectedClient.send(attemptTo, {
           text: message,
-          attachments,
+          attachments: pinnedAttachments,
           replyTo: effectiveReplyTo,
           supersedes,
           retryOf,
@@ -3682,7 +3684,7 @@ Usage:
                 details: { error: true },
               };
             }
-            const sent = await askWithNamePrefixFallback(connectedClient, { rawTo: cwd ? "" : to!, firstTarget: sendTo, display: targetDisplay }, { text: message, attachments, replyTo, supersedes, retryOf }, {
+            const sent = await askWithNamePrefixFallback(connectedClient, { rawTo: cwd ? "" : to!, firstTarget: sendTo, display: targetDisplay }, { text: message, attachments: pinFileAttachments(attachments), replyTo, supersedes, retryOf }, {
               signal: _signal,
               onAttempt: (askId) => { questionId = askId; },
               deliveryState: () => latestDeliveryState(questionId, deliveryState),
@@ -3835,7 +3837,7 @@ Usage:
             sendAttempted = true;
             const result = await connectedClient.send(target.from.id, {
               text: message,
-              attachments,
+              attachments: pinFileAttachments(attachments),
               wake: true,
               ...(pendingReplyTo ? { replyTo: pendingReplyTo } : {}),
             });
