@@ -10,7 +10,7 @@
 
 ## 发布版本与分支约定
 
-当前源代码候选版本为 **0.18.1-fork.11**，基于社区 **0.18.1**。模型调用边界会在 Schema 校验前修复 provider 生成的省略占位符，同时保持路由 ID 的 fail-closed 安全边界。候选通过审核并发布前，已发布 **0.18.1-fork.10** 仍是安装及回退参考。安装前核对同版本不可变 Release。fork 版本统一使用 `<社区版本>-fork.<修订号>`，本地修订不冒充社区新版本。
+当前源代码候选版本为 **0.18.1-fork.12**，基于社区 **0.18.1**，保留 fork 的 durable ask/reply、scope 路由、wake 策略和 runtime-version 契约，并纳入三项经过审计的 broker 修复。候选通过审核并发布前，已发布 **0.18.1-fork.11** 仍是安装及回退参考。安装前核对同版本不可变 Release。fork 版本统一使用 `<社区版本>-fork.<修订号>`，本地修订不冒充社区新版本。
 
 - `main`：我们的维护、整合与发布主线，保留 fork 修复。
 - `upstream-main`：仅镜像社区 `main`，不加入 fork 提交，也不作为安装来源。
@@ -19,7 +19,7 @@
 确认匹配的不可变 Release 已存在后再安装固定版本（源代码候选不代表已发布）：
 
 ```bash
-pi install git:github.com/chenhaoxiang/pi-intercom@v0.18.1-fork.11
+pi install git:github.com/chenhaoxiang/pi-intercom@v0.18.1-fork.12
 ```
 
 [GitHub Releases](https://github.com/chenhaoxiang/pi-intercom/releases) 提供可安装的包、来源清单和 `SHA256SUMS` 校验文件；这不是向上游作者的 npm 命名空间发布。发布及制品安装流程见[维护说明](docs/releasing.md)。

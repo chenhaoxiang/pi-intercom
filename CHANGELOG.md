@@ -4,6 +4,13 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.18.1-fork.12] - 2026-11-23
+
+### Fixed
+- Retain local Unix socket and named-pipe sessions during heartbeat starvation while preserving TCP eviction and endpoint probing.
+- Route messages to disconnected exact session IDs without falling through to live same-name look-alikes.
+- Probe broker endpoints when broker.pid names an unseen process before deciding whether startup is safe.
+
 ## [0.18.1-fork.11] - 2026-11-22
 
 ### Fixed
