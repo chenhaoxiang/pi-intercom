@@ -11,7 +11,6 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 - Route messages to disconnected exact session IDs without falling through to live same-name look-alikes.
 - Probe broker endpoints when broker.pid names an unseen process before deciding whether startup is safe.
 - Ignore late lifecycle events from disposed/replaced sessions so stale callbacks cannot mutate the current session state.
-- Report refusal when ordinary sends/replies target a busy headless session, while preserving canned replies for top-level asks and preventing reply loops.
 
 ## [0.18.1-fork.11] - 2026-11-22
 
