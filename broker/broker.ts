@@ -993,10 +993,7 @@ class IntercomBroker {
           }
           if (RECEIPT_PROOF_STATUSES.has(clientMessage.receipt.status)) {
             this.confirmPendingReceipt(deliveryKey, socket);
-          } else if (clientMessage.receipt.status === "expired") {
-            this.rejectPendingReceipt(deliveryKey, socket, clientMessage.receipt.detail ?? "Receiver refused the message");
           }
-        }
         }
         if (route?.to === currentKey && receiver?.socket === socket && sender) {
           writeMessage(sender.socket, {
@@ -1327,19 +1324,6 @@ class IntercomBroker {
     const record = this.deliveryRecords.get(key);
     if (record?.relations && record.state === "socket_delivered") record.relations.replyCorrelation = pending.demoted ? "late" : matched ? "matched" : record.relations.replyCorrelation;
     if (pending.senderSocket.writable) this.writeDeliverySuccess(pending.senderSocket, pending.messageId, "socket_delivered", pending.demoted);
-  }
-
-  // An expired receipt before any proof means the receiver refused the message: a known, final failure.
-  private rejectPendingReceipt(key: string, receiverSocket: net.Socket, reason: string): void {
-    const pending = this.pendingReceipts.get(key);
-    if (!pending || pending.targetSocket !== receiverSocket) return;
-    clearTimeout(pending.timer);
-    this.pendingReceipts.delete(key);
-    if (this.deliveryRecords.get(key)?.state === "unknown") {
-      this.updateDeliveryRecord(pending.fromKey, pending.messageId, "failed", reason, "E_RECEIVER_REFUSED");
-    }
-    this.releaseReplyEdge(pending.messageId, pending.scopeId);
-    if (pending.senderSocket.writable) this.writeDeliveryFailure(pending.senderSocket, pending.messageId, reason, "E_RECEIVER_REFUSED");
   }
 
   private failPendingReceipt(key: string, reason: string, code: string): void {
