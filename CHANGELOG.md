@@ -4,6 +4,14 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.18.1-fork.12] - 2026-11-23
+
+### Fixed
+- Retain local Unix socket and named-pipe sessions during heartbeat starvation while preserving TCP eviction and endpoint probing.
+- Route messages to disconnected exact session IDs without falling through to live same-name look-alikes.
+- Probe broker endpoints when broker.pid names an unseen process before deciding whether startup is safe.
+- Ignore late lifecycle events from disposed/replaced sessions so stale callbacks cannot mutate the current session state.
+
 ## [0.18.1-fork.11] - 2026-11-22
 
 ### Fixed
@@ -44,10 +52,15 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ### Fixed
 - Incorporate community fixes for stale broker PID ownership/reuse, cross-machine stdin failure handling, stale-session cleanup, late replies, no-wake sends and Herdr-free SSH discovery while retaining the maintained fork contracts.
+- Long synchronous tools no longer make local sessions disappear after 90 seconds. The broker keeps open Unix sockets and named pipes registered regardless of heartbeat silence, and still removes them on socket close/error. TCP heartbeat eviction and client-side broker probes remain enabled. Thanks to [@odfalik](https://github.com/odfalik) for #211 and #213.
 - A cross-machine send no longer crashes Pi when SSH or the remote relay closes its input before the message has finished writing. Failed commands retain their diagnostics, and incomplete writes cannot report success. Thanks to [@Oscar-Williams](https://github.com/Oscar-Williams) for #185.
 - After a reboot, the broker could refuse to start for hours when its old pid file pointed at a process the system had since given to another user. It now treats that pid as stale. Thanks to [@mimadiule](https://github.com/mimadiule) for issue #186.
 - After a reboot, the broker could also refuse to start when its old pid file pointed at an unrelated program of the same user, and intercom stayed down until the file was deleted by hand. The broker now counts the recorded process as a running broker only if it also answers on the broker's socket or pipe; a running broker is still never replaced. Thanks to [@wayne930242](https://github.com/wayne930242) for #198.
+- A second broker no longer deletes a running broker's socket when `broker.pid` names a process it cannot see, such as a broker in another pid namespace that shares the intercom directory. The broker now refuses to start while another broker still holds its socket or pipe, whatever broker.pid says. Thanks to [@rubaiz-fd](https://github.com/rubaiz-fd) for #216.
 - A reply sent after its ask had timed out, been cancelled, or already been answered was rejected and its content lost. It now reaches the asker as an ordinary message marked as a late reply. If the asker has disconnected or the broker has restarted, the reply fails and the tool tells the agent to use `send` instead. Thanks to [@mimadiule](https://github.com/mimadiule) for issue #187.
+- Late session events after a session is replaced no longer throw a "ctx is stale" error. Thanks to [@Alfabete-spec](https://github.com/Alfabete-spec) for #214 and [@lemonkiller](https://github.com/lemonkiller) for reporting #209.
+- A message sent to the exact ID of a disconnected session could go to a connected session with that name, or whose ID starts with it. It is now handled like any message to the disconnected session: it waits in the mailbox, or reaches a live session with the same name and folder at once, and an ask fails because the session is disconnected instead of reaching the look-alike. Thanks to [@olccamy](https://github.com/olccamy) for #202.
+- A cross-machine send from a shell could name the wrong session as its origin when several local sessions shared the sender's name, such as several `pi-intercom` CLI runs using the default name. The origin now keeps the name and leaves the session ID unknown instead of picking one of them. Thanks to [@olccamy](https://github.com/olccamy) for #202.
 
 ## [0.18.1-fork.5] - 2026-10-31
 
