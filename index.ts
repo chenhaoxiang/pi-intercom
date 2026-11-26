@@ -116,7 +116,7 @@ interface IntercomToolResult {
 
 // Keep the existing API, but reject action/field mistakes before connecting or sending.
 const INTERCOM_ACTION_FIELDS: Record<string, readonly string[]> = {
-  list: [],
+  list: ["workspaceId", "tabId"],
   "list-cwd": ["cwd"],
   pending: [],
   status: ["messageId"],
@@ -182,7 +182,13 @@ function prepareIntercomToolArguments(input: unknown): Record<string, unknown> {
   return params;
 }
 
-function parameterError(action: string, field: string, reason: string, unsupportedField = false): IntercomToolResult {
+function parameterError(
+  action: string,
+  field: string,
+  reason: string,
+  unsupportedField = false,
+  extra: Record<string, unknown> = {},
+): IntercomToolResult {
   const corrections = unsupportedField
     ? [{ intent: "minimal_call", instruction: `Remove unsupported field ${field} and retry the same ${action} action; do not add a replacement target or message unless that action requires one.` }]
     : field === "replyTo" ? [
@@ -200,6 +206,7 @@ function parameterError(action: string, field: string, reason: string, unsupport
   const body = {
     ok: false, code: "E_INTERCOM_INVALID_PARAMETERS", action, field, reason,
     state: "NOT_SENT", delivered: false, retryPolicy: "CORRECT_ARGUMENTS_ONCE", corrections,
+    ...extra,
   };
   return {
     isError: true,
@@ -232,11 +239,16 @@ function preflightIntercomParameters(params: Record<string, unknown>): IntercomT
   if (params.cwd != null && !hasText(params.cwd)) {
     return parameterError(action, "cwd", "cwd must be a non-empty directory, or omitted.");
   }
+  const received = Object.keys(params).filter((key) => params[key] !== undefined && params[key] !== "").join(", ");
   if (["send", "ask", "handover"].includes(action) && !hasText(params.to) && !hasText(params.cwd)) {
-    return parameterError(action, "to", "Missing 'to' or 'cwd' parameter; provide a real recipient.");
+    return parameterError(action, "to", "Missing 'to' or 'cwd' parameter; provide a real recipient.", false, {
+      received,
+    });
   }
   if (["send", "ask", "reply"].includes(action) && !hasText(params.message)) {
-    return parameterError(action, "message", "Missing 'message' parameter; provide non-empty text.");
+    return parameterError(action, "message", "Missing 'message' parameter; provide non-empty text.", false, {
+      received,
+    });
   }
   if (action === "cancel" && !hasText(params.messageId)) {
     return parameterError(action, "messageId", "Missing 'messageId' parameter; cancel needs a real prior message ID.");
@@ -2292,7 +2304,7 @@ export default function piIntercomExtension(pi: ExtensionAPI, piVersion = VERSIO
       "Execution/completion: UNKNOWN. The original request body is intentionally not replayed. Inspect the original message status before taking over; do not assume the original action did not run.",
     ].join("\n");
     try {
-      const firstTarget = await resolveSessionTarget(activeClient, fallback) ?? fallback;
+      const firstTarget = (await resolveSessionTarget(activeClient, fallback))?.id ?? fallback;
       const escalationId = randomUUID();
       const result = await new Promise<SendResult>((resolve, reject) => {
         const timer = setTimeout(() => resolve({
@@ -3690,9 +3702,9 @@ Usage:
               target = (await resolveSessionTarget(connectedClient, to!)) ?? { id: to!, label: to! };
             }
             const sendTo = target.id;
-            const targetDisplay = target.projectPane ? target.label : to ?? target.label;
+            const targetDisplay = target.label;
             askTargetForFailure = targetDisplay;
-            _onUpdate?.({ content: [{ type: "text", text: `Recipient: ${targetDisplay}` }], details: { recipientLabel: targetDisplay } });
+            _onUpdate?.({ content: [{ type: "text", text: `Recipient: ${target.label}` }], details: { recipientLabel: target.label } });
             if (_signal?.aborted) {
               return cancelledBeforeSendResult(parameterWarnings);
             }

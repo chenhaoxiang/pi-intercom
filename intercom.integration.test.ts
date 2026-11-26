@@ -1329,16 +1329,22 @@ test("send and ask name the missing field and list what arrived", { concurrency:
       return result.content.map((part) => part.text).join("\n");
     };
 
-    const noTarget = await run("send-no-target", { action: "send", message: "status?", focus: false });
-    assert.match(noTarget, /^send is missing a target: pass to \(a session name or ID\) or cwd\./);
-    assert.match(noTarget, /Received: action, message, focus\./);
-    assert.match(noTarget, /Received: action, message, focus\. To answer a message, pass its sender as to\.$/);
+    // The maintained fork answers invalid tool parameters with the structured NOT_SENT contract
+    // (details + JSON body) instead of prose; the missing field and the fields that arrived stay explicit.
+    const bodyOf = (text: string) => JSON.parse(text) as { field?: string; received?: string; state?: string };
 
-    const noMessage = await run("send-no-message", { action: "send", to: "planner" });
-    assert.match(noMessage, /^send is missing message\. Received: action, to\.$/);
+    const noTarget = bodyOf(await run("send-no-target", { action: "send", message: "status?", focus: false }));
+    assert.equal(noTarget.field, "to");
+    assert.equal(noTarget.state, "NOT_SENT");
+    assert.equal(noTarget.received, "action, message, focus");
 
-    const askNothing = await run("ask-nothing", { action: "ask" });
-    assert.match(askNothing, /^ask is missing message and a target: pass to \(a session name or ID\) or cwd\. Received: action\.$/);
+    const noMessage = bodyOf(await run("send-no-message", { action: "send", to: "planner" }));
+    assert.equal(noMessage.field, "message");
+    assert.equal(noMessage.received, "action, to");
+
+    const askNothing = bodyOf(await run("ask-nothing", { action: "ask" }));
+    assert.equal(askNothing.field, "to");
+    assert.equal(askNothing.received, "action");
   } finally {
     await harness.emitLifecycle("session_shutdown");
     await setup.cleanup();

@@ -195,6 +195,17 @@ For native cross-machine `send`, address the session as `reviewer@workstation` (
 
 The relay carries structured SSH-asserted origin metadata. Incoming headers render `From worker@laptop · unverified cross-machine` and provide a new-message `send` hint to that address. This identity is not cryptographically verified: anyone with SSH access that can invoke the relay can claim it. Cross-machine `ask`, `replyTo`, attachments, supersede, retry, `noWake`, cwd/project-pane routing, and lifecycle actions are not supported in v1.
 
+## Herdr locations, filters and attachments
+
+`list` can be narrowed to one Herdr workspace or tab, using the bracketed IDs it shows:
+`intercom({ action: "list", workspaceId: "ws-…" })` or `tabId: "tab-…"`. Sessions without a current
+Herdr location are left out. Project panes work under the Herdr TUI and under the Herdr desktop app
+(`herdr-app` + `herdr-core`); open-project-pane sends use `cwd` as before.
+
+`toolExposure: "deferred"` registers the intercom tool only through codemode, and reply hints say so.
+Explicit file attachments carry a pinned SHA-256; the receiver checks the on-disk file is unchanged
+before handing it to the model and reports a mismatch instead of silently using stale bytes.
+
 ## Pi-subagents integration
 
 When `pi-subagents` supplies bridge metadata, a delegated child receives the child-only `contact_supervisor` tool. Use:

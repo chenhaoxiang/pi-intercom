@@ -4,6 +4,22 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.19.0-fork.1] - 2026-11-26
+
+### Added
+- Sync the community 0.19.0 feature line while keeping the fork's bounded ask/reply, UNKNOWN, runtime-version, follow-up, Herdr and release contracts.
+- Show a recipient's resolved session name in intercom tool results; duplicate names keep a unique ID prefix.
+- Cache completed inline message renders, and let compose messages be edited and scrolled.
+- Support the Herdr desktop app (`herdr-app` + `herdr-core`) for project panes, and optionally open panes in their own space.
+- Filter `list` by Herdr workspace or tab (`workspaceId`, `tabId`).
+- Pin explicit file attachments with SHA-256 on send and verify on-disk freshness on receipt.
+- Register the intercom tool deferred when configured (`toolExposure`), with the codemode hint in reply guidance.
+- Name the missing send/ask field in the structured `E_INTERCOM_INVALID_PARAMETERS` result and list the fields that arrived.
+
+### Notes
+- The community busy-headless refusal commit (#221) stays excluded: its regression was not root-caused, and the fork keeps its own bounded delivery/UNKNOWN behavior instead.
+- No provider calls were needed: the full fork test list including the new tool-exposure, Herdr filter, deferred registration and attachment-freshness tests passes locally.
+
 ## [0.18.1-fork.12] - 2026-11-23
 
 ### Fixed
