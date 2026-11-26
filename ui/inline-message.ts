@@ -11,10 +11,9 @@ export class InlineMessageComponent implements Component {
   private theme: Theme;
   private replyCommand?: string;
   private bodyText?: string;
-  // Caches assume message/bodyText never mutate after construction; theme
-  // styling stays outside the caches so live theme changes apply per render.
   private collapsedPreview?: string;
   private wrappedBody?: { width: number; lines: string[] };
+  private rendered?: { width: number; collapsed: boolean; lines: string[] };
 
   constructor(
     from: SessionInfo,
@@ -32,7 +31,9 @@ export class InlineMessageComponent implements Component {
     this.bodyText = bodyText;
   }
 
-  invalidate(): void {}
+  invalidate(): void {
+    this.rendered = undefined;
+  }
 
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (event.type !== "click" || event.button !== "left"
@@ -45,8 +46,14 @@ export class InlineMessageComponent implements Component {
 
   render(width: number): string[] {
     const collapsed = !this.expansionState.expanded;
-    const lines: string[] = [];
-    const borderChar = "─";
+    const cached = this.rendered;
+    if (cached && cached.width === width && cached.collapsed === collapsed) return cached.lines;
+    const lines = this.renderLines(width, collapsed);
+    this.rendered = { width, collapsed, lines };
+    return lines;
+  }
+
+  private renderLines(width: number, collapsed: boolean): string[] {
     const remoteSender = this.message.crossMachine && relaySenderName(this.message.crossMachine.origin);
     const senderName = remoteSender
       ? `${remoteSender} · unverified cross-machine`
@@ -54,6 +61,8 @@ export class InlineMessageComponent implements Component {
     const replyLabel = remoteSender
       ? `To send a new message to ${remoteSender}:`
       : "To reply:";
+    const lines: string[] = [];
+    const borderChar = "─";
     if (width < 3) {
       return [truncateToWidth(`From ${senderName}`, width)];
     }

@@ -48,7 +48,24 @@ Name the current session so peers can address it reliably:
 
 Open the picker with **Alt+M** or `/intercom`, or use the tool directly:
 
-```ts
+## Quick Start
+
+### From the Keyboard
+
+Press **Alt+M** or type `/intercom` to open the session list overlay:
+
+1. **Select a session** — Use arrow keys to pick a target session
+2. **Compose message** — Write your message in the compose overlay
+3. **Send** — Press Enter to send, Escape to cancel
+
+Press **h** on a highlighted session to hand this session over to it instead (see [Workflow: Handing Over a Session](#workflow-handing-over-a-session)).
+
+### From the Agent
+
+The agent can list sessions and send messages using the `intercom` tool. Tool calls and results render as compact transcript rows so send/ask/reply flows are easy to scan. A recipient addressed by ID shows by its session name. Use `/intercom-id` to insert a handoff snippet for the current session's stable intercom target into the editor. For common patterns like planner-worker delegation, the bundled `pi-intercom` skill provides copy-paste ready examples:
+
+```typescript
+// List active sessions
 intercom({ action: "list" })
 intercom({ action: "send", to: "worker", message: "Please check the parser edge cases.", wake: true })
 intercom({ action: "ask", to: "planner", message: "Which compatibility behavior should I preserve?" })
@@ -177,6 +194,17 @@ Invalid configuration fails closed for inbound broker auto-triggering by using `
 For native cross-machine `send`, address the session as `reviewer@workstation` (or a full session UUID followed by `@workstation`). pi-intercom finds the session on that machine and relays the message through SSH while every broker remains local-only. Herdr is optional. If `workstation` is an enabled saved Herdr machine, its Herdr agent list is checked first and its saved SSH target is used. Otherwise, or if Herdr is not installed, `workstation` is used as an SSH host name (`~/.ssh/config` aliases work). Sessions that Herdr does not list are found by running `<crossMachine.remoteCommand> list --json` (default `pi-intercom list --json`) on the machine. Those SSH connections run in batch mode, so they need key or agent authentication and a known host key; a password or host-key prompt fails instead of waiting. Ordinary local targets never fall back to remote discovery, and disabled Herdr machines and malformed addresses fail closed.
 
 The relay carries structured SSH-asserted origin metadata. Incoming headers render `From worker@laptop · unverified cross-machine` and provide a new-message `send` hint to that address. This identity is not cryptographically verified: anyone with SSH access that can invoke the relay can claim it. Cross-machine `ask`, `replyTo`, attachments, supersede, retry, `noWake`, cwd/project-pane routing, and lifecycle actions are not supported in v1.
+
+## Herdr locations, filters and attachments
+
+`list` can be narrowed to one Herdr workspace or tab, using the bracketed IDs it shows:
+`intercom({ action: "list", workspaceId: "ws-…" })` or `tabId: "tab-…"`. Sessions without a current
+Herdr location are left out. Project panes work under the Herdr TUI and under the Herdr desktop app
+(`herdr-app` + `herdr-core`); open-project-pane sends use `cwd` as before.
+
+`toolExposure: "deferred"` registers the intercom tool only through codemode, and reply hints say so.
+Explicit file attachments carry a pinned SHA-256; the receiver checks the on-disk file is unchanged
+before handing it to the model and reports a mismatch instead of silently using stale bytes.
 
 ## Pi-subagents integration
 

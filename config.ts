@@ -41,6 +41,16 @@ export interface CrossMachineConfig {
   remoteCommand: string;
 }
 
+export type ProjectPlacement = "pane" | "space";
+
+/** How the intercom tool reaches the model: declared, or deferred for codemode scripts. */
+export type ToolExposure = "direct" | "deferred";
+
+export interface HerdrConfig {
+  /** Herdr app: where a project pane opens for a folder outside the caller's space. */
+  projectPlacement: ProjectPlacement;
+}
+
 export interface IntercomConfig {
   /** Broker command used to spawn the broker process (e.g. "npx" or "bun") */
   brokerCommand: string;
@@ -69,8 +79,16 @@ export interface IntercomConfig {
   /** Show reply hint in incoming messages (default: true) */
   replyHint: boolean;
 
+  /**
+   * Register the intercom tool without declaring it, so it costs no prompt space and is
+   * called from codemode scripts instead (default: direct).
+   */
+  toolExposure: ToolExposure;
+
   /** Cross-machine discovery and SSH relay settings. */
   crossMachine: CrossMachineConfig;
+
+  herdr: HerdrConfig;
 }
 
 export function getConfigPath(intercomDir: string = getIntercomDirPath()): string {
@@ -86,16 +104,18 @@ const defaults: IntercomConfig = {
   busyDelivery: "steer",
   enabled: true,
   replyHint: true,
+  toolExposure: "direct",
   crossMachine: {
     machineName: defaultMachineName(hostname()),
     remoteCommand: "pi-intercom",
   },
+  herdr: { projectPlacement: "pane" },
 };
 
 export function loadConfig(): IntercomConfig {
   const configPath = getConfigPath();
   if (!existsSync(configPath)) {
-    return { ...defaults, crossMachine: { ...defaults.crossMachine } };
+    return { ...defaults, crossMachine: { ...defaults.crossMachine }, herdr: { ...defaults.herdr } };
   }
   
   try {
@@ -109,6 +129,7 @@ export function loadConfig(): IntercomConfig {
     const config: IntercomConfig = {
       ...defaults,
       crossMachine: { ...defaults.crossMachine },
+      herdr: { ...defaults.herdr },
     };
 
     if (Object.hasOwn(parsedConfig, "brokerCommand")) {
@@ -175,6 +196,13 @@ export function loadConfig(): IntercomConfig {
       config.replyHint = parsedConfig.replyHint;
     }
 
+    if (Object.hasOwn(parsedConfig, "toolExposure")) {
+      if (parsedConfig.toolExposure !== "direct" && parsedConfig.toolExposure !== "deferred") {
+        throw new Error(`"toolExposure" must be "direct" or "deferred"`);
+      }
+      config.toolExposure = parsedConfig.toolExposure;
+    }
+
     if (Object.hasOwn(parsedConfig, "status")) {
       if (typeof parsedConfig.status !== "string") {
         throw new Error(`"status" must be a string`);
@@ -210,6 +238,20 @@ export function loadConfig(): IntercomConfig {
           throw new Error(`"crossMachine.remoteCommand" must be a non-empty string`);
         }
         config.crossMachine.remoteCommand = crossMachine.remoteCommand.trim();
+      }
+    }
+
+    if (Object.hasOwn(parsedConfig, "herdr")) {
+      const value = parsedConfig.herdr;
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        throw new Error(`"herdr" must be an object`);
+      }
+      const herdr = value as Record<string, unknown>;
+      if (Object.hasOwn(herdr, "projectPlacement")) {
+        if (herdr.projectPlacement !== "pane" && herdr.projectPlacement !== "space") {
+          throw new Error(`"herdr.projectPlacement" must be "pane" or "space"`);
+        }
+        config.herdr.projectPlacement = herdr.projectPlacement;
       }
     }
 
