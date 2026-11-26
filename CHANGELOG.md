@@ -4,6 +4,11 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 
 ## [Unreleased]
 
+## [0.19.0-fork.2] - 2026-11-27
+
+### Fixed
+- Sync the community post-0.19 fixes, including busy-headless refusal reporting (#221), disconnected-session ID routing (#220), broker heartbeat retention (#213), lifecycle-event filtering (#214) and missing send/ask field diagnostics (#215), while keeping the fork's structured NOT_SENT contract and bounded follow-up/receipt behavior.
+
 ## [0.19.0-fork.1] - 2026-11-26
 
 ### Added
@@ -69,9 +74,10 @@ All notable changes to the `pi-intercom` extension will be documented in this fi
 - Intercom messages in the chat no longer redo their layout on every screen redraw, so long sessions with many messages redraw with less work. Thanks to [@chpock](https://github.com/chpock) for #203.
 - Intercom tool rows, confirmations and results show the recipient's session name when you address it by ID or ID prefix. Thanks to [@igt-sferk](https://github.com/igt-sferk) for #210.
 - The bundled `pi-intercom` skill is a quarter of its old size and no longer says intercom is same-machine only, which made agents refuse to message sessions on other machines. It now covers sending and handing over to `name@machine`, asking a waiting subagent a follow-up question inside your reply, and steering a subagent after a progress update.
-- Intercom errors now say what to do next: a failed `reply` points to `pending` or `send`, an `ask` to another machine says to use `send`, an `ask` to a subagent that is waiting on you says to answer it with `reply`, and a message to a directory with no session asks the agent to open a new Pi pane only when the user wants one.
-- The README now explains the ask timeouts: the Pi tool waits 10 minutes and the CLI 120 seconds by default, and the broker reads its own `PI_INTERCOM_ASK_TIMEOUT_MS` when it starts, which limits how long a reply is accepted. Thanks to [@mimadiule](https://github.com/mimadiule) for issue #189.
-- The README now documents the mailbox for disconnected sessions: who gets queued mail, when it expires, and what a broker restart loses. Thanks to [@mimadiule](https://github.com/mimadiule) for issue #188.
+- Intercom errors now say what to do next: a failed `reply` points to `pending` or `send`, an `ask` to another machine says to use `send`, an `ask` to a subagent that is waiting on you says to answer with `reply`, and a message to a folder with no session asks the agent to open a new Pi pane only when you want one.
+- Tool rows, confirmations and results show the recipient's session name when you address it by ID or ID prefix. Thanks to [@igt-sferk](https://github.com/igt-sferk) for #210.
+- Long sessions with many intercom messages redraw faster, because messages no longer redo their layout on every redraw. Thanks to [@chpock](https://github.com/chpock) for #203.
+- The README now explains ask timeouts (10 minutes for the Pi tool, 120 seconds for the CLI, and the broker's own `PI_INTERCOM_ASK_TIMEOUT_MS` limit) and the mailbox for disconnected sessions: who gets queued mail, when it expires, and what a broker restart loses. Thanks to [@mimadiule](https://github.com/mimadiule) for issues #188 and #189.
 
 ### Fixed
 - Incorporate community fixes for stale broker PID ownership/reuse, cross-machine stdin failure handling, stale-session cleanup, late replies, no-wake sends and Herdr-free SSH discovery while retaining the maintained fork contracts.
